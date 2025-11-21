@@ -1,1 +1,6 @@
-vector_addition.exe
+*.exe
+*.obj
+*.o
+*.out
+*.dll
+*.pdb
