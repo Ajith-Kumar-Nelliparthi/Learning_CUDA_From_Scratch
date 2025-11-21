@@ -4,7 +4,7 @@
 // Initalize kernel
 __global__ void add(const float *a, const float *b, float *c, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    for(; idx < size; idx += blockDim.x + gridDim.x) {
+    for(; idx < size; idx += blockDim.x * gridDim.x) {
         c[idx] = a[idx] + b[idx];
     }
 }
