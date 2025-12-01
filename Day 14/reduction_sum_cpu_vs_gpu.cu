@@ -50,7 +50,7 @@ __global__ void reduceSumGPU(const float *i, float *o, int n){
     }
 
     if (tid == 0){
-        o[blockDim.x] = val;
+        o[blockIdx.x] = val;
     }
 }
 
