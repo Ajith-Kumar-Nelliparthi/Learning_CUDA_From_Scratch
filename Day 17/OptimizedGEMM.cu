@@ -154,7 +154,7 @@ int main() {
     // Warmup
     gemm<<<grid, block>>>(d_A, d_B, d_C, M, N, K);
     cudaGetLastError();
-    cudaDeviceSynchronize());
+    cudaDeviceSynchronize();
 
     // Timing
     cudaEvent_t start, stop;
