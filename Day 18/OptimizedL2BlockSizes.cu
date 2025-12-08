@@ -162,7 +162,7 @@ void L2Normalize_cuda_kernel(const float *d_input, float *d_output, int N){
 }
 
 int main() {
-    const int N = 1 << 24;
+    const int N = 1 << 24; 
     size_t bytes = N * sizeof(float);
 
     float *h_in  = (float*)malloc(bytes);
