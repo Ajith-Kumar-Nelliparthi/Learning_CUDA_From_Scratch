@@ -1,2 +1,3 @@
 ## Day 19 of Learning CUDA:
-- Solved Relu on LeetGPU
+- Solved Relu  and LeakyRelu in LeetGPU
+- 
