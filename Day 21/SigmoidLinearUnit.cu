@@ -8,7 +8,8 @@ __global__ void Sigmoid(float *I, float *O, int N){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < N){
         float x = I[idx];
-        O[idx] = 1.0f / (1.0f + __expf(-x));
+        float sigmoid = 1.0f / (1.0f + __expf(-x));
+        O[idx] = x * sigmoid;
     }
 }
 
