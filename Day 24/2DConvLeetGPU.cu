@@ -1,0 +1,32 @@
+#include <cuda_runtime.h>
+
+#define TILE_SIZE 16
+
+__global__ void Conv(const float* input, const float* kernel, float* output, int input_rows, int input_cols, int kernel_rows, int kernel_cols){
+    int row = blockIdx.y * TILE_SIZE + threadIdx.y;
+    int col = blockIdx.x * TILE_SIZE + threadIdx.x;
+
+    if (row < input_rows - kernel_rows + 1 && col < input_cols - kernel_cols + 1){
+        float sum = 0.0f;
+        for (int i=0; i< kernel_rows; i++){
+            for (int j=0; j<kernel_cols; j++){
+                sum += input[(row + i) * input_cols + (col + j)] * kernel[i * kernel_cols + j];
+            }
+        }
+        output[row * (input_cols - kernel_cols + 1) + col] = sum;
+    }
+}
+
+
+// input, kernel, output are device pointers
+extern "C" void solve(const float* input, const float* kernel, float* output,
+           int input_rows, int input_cols, int kernel_rows, int kernel_cols) {
+    int output_rows = input_rows - kernel_rows + 1;
+    int output_cols = input_cols - kernel_cols + 1;
+    dim3 threadsPerBlock(TILE_SIZE, TILE_SIZE);
+    dim3 blocksPerGrid((output_cols + TILE_SIZE - 1) / TILE_SIZE,
+										 (output_rows + TILE_SIZE - 1) / TILE_SIZE);
+
+	Conv<<<blocksPerGrid, threadsPerBlock>>>(input, kernel, output, input_rows, input_cols, kernel_rows, kernel_cols);
+	cudaDeviceSynchronize();
+}
