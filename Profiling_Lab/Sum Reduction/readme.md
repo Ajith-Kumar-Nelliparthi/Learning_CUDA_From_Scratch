@@ -26,11 +26,12 @@ This design minimizes global memory accesses and leverages shared memory efficie
 - The kernel is compute-efficient and well-optimized.
 
 2. **Memory Transfer Time (The Real Bottleneck!)**
+```
 | Time (%) | Total Time (ns) | Operation     |
 | -------- | --------------- | ------------- |
 | 99.7     | 2,306,159       | Host → Device |
 | 0.3      | 7,648           | Device → Host |
-
+```
 **Key Insight:**
 - Host → Device copy: ~2.3 ms
 - Kernel execution: ~0.17 ms
@@ -44,12 +45,13 @@ Kernel Execution: ██                            (0.17 ms)
 This workload is memory-bound, not compute-bound. The GPU spends far more time waiting on PCIe transfers than performing computation.
 
 3. **CUDA API Overhead**
+```
 | Time (%) | Total Time (ns) | API Call   |
 | -------- | --------------- | ---------- |
 | 95.8     | 90,344,360      | cudaMalloc |
 | 3.1      | 2,915,209       | cudaMemcpy |
 | 0.5      | 475,069         | cudaFree   |
-
+```
 - **Shocking Discovery**: cudaMalloc took 90 milliseconds! This is because:
     - First allocation initializes GPU context
     - Memory allocation is expensive
