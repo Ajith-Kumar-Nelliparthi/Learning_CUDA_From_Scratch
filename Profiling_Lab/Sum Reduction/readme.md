@@ -12,6 +12,7 @@ This design minimizes global memory accesses and leverages shared memory efficie
 ![alt text](<Screenshot 2025-12-16 152403.png>)
 
 ### Nsight Systems Results — reduction_sum Kernel v1
+![alt text](<Screenshot 2025-12-16 152556.png>)
 1. **Kernel Execution Time**
 ```
 | Time (%) | Total Time (ns) | Instances | Avg (ns) |
