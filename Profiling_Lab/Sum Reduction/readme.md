@@ -9,6 +9,7 @@ The first reduction kernel (v1) has the following characteristics:
 - Reduction Strategy:
     - Tree-based reduction, halving the number of active threads at each iteration
 This design minimizes global memory accesses and leverages shared memory efficiently.
+![alt text](<Screenshot 2025-12-16 152403.png>)
 
 ### Nsight Systems Results — reduction_sum Kernel v1
 1. **Kernel Execution Time**
