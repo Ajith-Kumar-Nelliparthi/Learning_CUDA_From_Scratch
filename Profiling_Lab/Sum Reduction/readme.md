@@ -12,9 +12,11 @@ This design minimizes global memory accesses and leverages shared memory efficie
 
 ### Nsight Systems Results — reduction_sum Kernel v1
 1. **Kernel Execution Time**
+```
 | Time (%) | Total Time (ns) | Instances | Avg (ns) |
 | -------- | --------------- | --------- | -------- |
 | 100.0    | 169,979         | 3         | 56,659.7 |
+```
 **Interpretation**:
 - Kernel executed 3 times (one per block-size configuration)
 - Average execution time: ~56.7 µs
