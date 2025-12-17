@@ -61,7 +61,7 @@ This workload is memory-bound, not compute-bound. The GPU spends far more time w
 
 
 # CUDA Reduction Performance Analysis Report for Second OPtimized Kernel
-
+![alt text](image.png)
 ## Executive Summary
 
 **Optimization Result: 647× Speedup**
