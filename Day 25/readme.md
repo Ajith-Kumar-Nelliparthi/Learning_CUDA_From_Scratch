@@ -3,3 +3,4 @@
 - Completed reading Cooperative Groups and Programmatic Dependent lauch and Synchronization.
 - Completed reading [Dynamic Parrallelism](https://intro-to-cuda.readthedocs.io/en/latest/tutorial/dynamic.html).
 - Completed reading [Finding Optimal GPU Occupancy](https://intro-to-cuda.readthedocs.io/en/latest/tutorial/occupancy.html).
+- Solved Count Array Element in LeetGPU.
