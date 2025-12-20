@@ -139,7 +139,7 @@ int main(){
     int half_N = N / 2;
 
     int threadsPerBlock = 256;
-    int blocksPerStream = (half_N + threadsPerBlock * 1) / threadsPerBlock;
+    int blocksPerStream = (half_N + threadsPerBlock - 1) / threadsPerBlock;
 
     // Allocate pinned host memory
     float *h_a, *h_b, *h_c;
