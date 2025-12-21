@@ -15,7 +15,7 @@ __global__ void exponential(const float *A, float *B, int N){
     }
 }
 
-__global__ void absolute_value1(const float *A, float *B, int N){
+__global__ void exponential1(const float *A, float *B, int N){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
     int warpId = idx / 32;
@@ -25,7 +25,7 @@ __global__ void absolute_value1(const float *A, float *B, int N){
     }
 }
 
-__global__ void absolute_value2(const float *A, float *B, int N){
+__global__ void exponential2(const float *A, float *B, int N){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
     int vecN = N /4;
