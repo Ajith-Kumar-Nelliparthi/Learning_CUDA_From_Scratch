@@ -1,8 +1,5 @@
-## Day 29 of Learning CUDA:
-- Solved Cubic Polynomial equation int grid-stride loop and vectorised with grid.
-- Solved vector Magnitude.
-- Solved Absolute value of a element.
-- Solved Element Wise Square.
-- Solved Element Wise SQRT.
-- Solved Element Wise Exponential.
-- Solved Element Wise Logarthim.
+## Day 29 of Learning CUDA
+- Implemented cubic polynomial evaluation using grid-stride loops & grid-level vectorization
+- Built kernels for vector magnitude
+- Implemented element-wise ops: abs, square, sqrt, exp, log
+- Focus: data-parallel math kernels & memory-efficient execution
