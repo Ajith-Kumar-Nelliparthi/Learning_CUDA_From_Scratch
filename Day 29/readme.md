@@ -5,3 +5,4 @@
 - Solved Element Wise Square.
 - Solved Element Wise SQRT.
 - Solved Element Wise Exponential.
+- Solved Element Wise Logarthim.
