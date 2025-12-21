@@ -4,3 +4,4 @@
 - Solved Absolute value of a element.
 - Solved Element Wise Square.
 - Solved Element Wise SQRT.
+- Solved Element Wise Exponential.
