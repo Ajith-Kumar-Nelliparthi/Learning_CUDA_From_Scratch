@@ -6,7 +6,7 @@ __global__ void warmup(){
     if (idx == 0) printf("Warmup complete!\n");
 }
 
-__global__ void absolute_value(const float *A, float *B, int N){
+__global__ void exponential(const float *A, float *B, int N){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
 
