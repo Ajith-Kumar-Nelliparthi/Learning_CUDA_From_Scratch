@@ -6,7 +6,7 @@ __global__ void warmup(){
     if (idx == 0) printf("Warmup complete!\n");
 }
 
-__global__ void absolute_value(const float *A, float *B, int N){
+__global__ void sqrt(const float *A, float *B, int N){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
 
@@ -15,7 +15,7 @@ __global__ void absolute_value(const float *A, float *B, int N){
     }
 }
 
-__global__ void absolute_value1(const float *A, float *B, int N){
+__global__ void sqrt1(const float *A, float *B, int N){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
     int warpId = idx / 32;
@@ -25,7 +25,7 @@ __global__ void absolute_value1(const float *A, float *B, int N){
     }
 }
 
-__global__ void absolute_value2(const float *A, float *B, int N){
+__global__ void sqrt2(const float *A, float *B, int N){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
     int vecN = N /4;
