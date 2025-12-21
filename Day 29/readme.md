@@ -3,3 +3,4 @@
 - Solved vector Magnitude.
 - Solved Absolute value of a element.
 - Solved Element Wise Square.
+- Solved Element Wise SQRT.
