@@ -160,3 +160,79 @@ __global__ void sum_reduction_multiple_elements(const float *A, float *B, int N)
         atomicAdd(B, sdata[0]);
     }
 }
+
+// kernel-7: warp level intrinsics
+__inline__ __device__ float warpReduceSum(float val){
+    for (int offset=16; offset>0; offset >>=1){
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    return val;
+}
+
+__global__ void sum_reduction_warp_intrinsics(const float *A, float *B, int N){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+
+    float sum = 0.0f;
+    for (int i=idx; i<N; i+=stride){
+        sum += A[i];
+    }
+
+    // warp-lelvel reduction
+    sum = warpReduceSum(sum);
+    int laneId = tid % 32;
+    int warpId = tid / 32;
+
+    // write reduced value to shared memory
+    __shared__ float sdata[32]; // max 1024 threads -> 32 warps
+    if (laneId == 0) sdata[warpId] = sum;
+    __syncthreads();
+
+    // block-level reduction
+    if (warpId == 0){
+        sum = (tid < (blockDim.x / 32)) ? sdata[laneId] : 0.0f;
+        sum = warpReduceSum(sum);
+        if (tid == 0){
+            atomicAdd(B, sum);
+        }
+    }
+}
+
+// kernel-9:- vectorised loads with shuffle
+__global__ void sum_reduction_vectorised_shuffle(const float *A, float *B, int N){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    
+    int vecN = N / 4;
+    float sum = 0.0f;
+    const float4 *a = reinterpret_cast<const float4 *>(A);
+    for (int i=idx; i<vecN; i+=stride){
+        float4 v = a[i];
+        sum += v.x + v.y + v.z + v.w;
+    }
+    // handle remaining elements
+    for (int i=vecN*4 + idx; i<N; i+=stride){
+        sum += A[i];
+    }
+
+    // warp-level reduction
+    sum = warpReduceSum(sum);
+    int laneId = tid % 32;
+    int warpId = tid / 32;
+
+    // write reduced value to shared memory
+    __shared__ float sdata[32]; // max 1024 threads -> 32 warps
+    if (laneId == 0) sdata[warpId] = sum;
+    __syncthreads();
+
+    // block-level reduction
+    if (warpId == 0){
+        sum = (tid < (blockDim.x / 32)) ? sdata[laneId] : 0.0f;
+        sum = warpReduceSum(sum);
+        if (tid == 0){
+            atomicAdd(B, sum);
+        }
+    }
+}
