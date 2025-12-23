@@ -110,3 +110,76 @@ __global__ void max_reduction_complete_unroll(const int *A, int *B, int N){
     }
 }
 
+// warp level reduction
+__inline__ __device__ int warpReduceMax(int val){
+    for (int offset = 16; offset >0; offset >>=1){
+        val = max(val, __shfl_down_sync(0xffffffff, val, offset));
+    }
+    return val;
+}
+
+__global__ void max_reduction_warp(const int *A, int *B, int N){
+    unsigned int tid = threadIdx.x;
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+
+    int val = 0;
+    for (int i=idx; i<N; i+=stride){
+        val = max(val, A[i]);
+    }
+    // warp reduction
+    val = warpReduceMax(val);
+    int laneId = tid % 32;
+    int warpId = tid / 32;
+
+    // write reduced value to shared memory
+    __shared__ int sdata[32]; // max 1024 threads -> 32 warps
+    if (laneId == 0) sdata[warpId] = val;
+    __syncthreads();
+
+    // block reduction
+    if (warpId == 0){
+        val = (tid < blockDim.x / 32) ? sdata[laneId] : INT_MIN;
+        val = warpReduceMax(val);
+        if (tid == 0){
+            atomicMax(B, val);
+        }
+    }
+}
+
+// vectorized load
+__global__ void max_reduction_vectorized(const int *A, int *B, int N){
+    unsigned int tid = threadIdx.x;
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+
+    int vecN = N / 4;
+    int val = INT_MIN;
+    for (int i=idx; i<vecN; i+=stride){
+        int4 data = reinterpret_cast<const int4*>(A)[i];
+        val = max(val, max(data.x, max(data.y, max(data.z, data.w))));
+    }
+    // handle tail
+    for (int i=vecN *4 + idx; i<N; i+=stride){
+        val = max(val, A[i]);
+    }
+
+    // warp reduction
+    val = warpReduceMax(val);
+    int laneId = tid % 32;
+    int warpId = tid / 32;
+
+    // write result into shared memory
+    __shared__ int sdata[32];
+    if (laneId == 0) sdata[warpId] = val;
+    __syncthreads();
+
+    // block reduction
+    if (warpId == 0){
+        val = (tid < (blockDim.x / 32)) ? sdata[laneId] : INT_MIN;
+        val = warpReduceMax(val);
+        if (tid == 0){
+            atomicMax(B, val);
+        }
+    }
+}
