@@ -137,3 +137,40 @@ __global__ void sum_reduction_warp_intrinsics(const float *A, float *B, int N){
         }
     }
 }
+
+// vectorised with warp shuffle
+__global__ void vectorized(const int* __restrict__ A, int *B, int N){
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+
+    int vecN = N / 4;
+    int sum = 0;
+    const int4 *a = reinterpret_cast<const int4*>(A);
+    for (int i=idx; i<vecN; i+=stride){
+        int4 v = a[i];
+        sum += v.x + v.y + v.z + v.w;
+    }
+    // taile elements
+    for (int i = vecN * 4 * stride + idx; i < N; i += stride) {
+    sum += A[i];
+    }
+    // warp reduce
+    sum = warpReduce(sum);
+    int laneId = tid % 32;
+    int warpId = tid / 32;
+
+    // write reduced value to shared memory
+    __shared__ int sdata[32];
+    if (laneId == 0) sdata[warpId] = sum;
+    __syncthreads();
+
+    // block reduction
+    if (warpId == 0){
+        sum = (tid < (blockDim.x / 32)) ? sdata[laneId] : 0.0f;
+        sum = warpReduce(sum);
+        if (tid == 0){
+            B[blockIdx.x] = sum;
+        }
+    }
+}
