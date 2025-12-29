@@ -16,3 +16,4 @@ Breakdown:
   Average:           ~15% ✗
 ```
 - solved matrix transpose with shared memory achieved 3X speedup than naive.
+- Optimized matrix transpose with padding and achieved 4X spedd than last one with shared memory.
