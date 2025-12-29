@@ -1,19 +1,14 @@
 ## Day 37 of Learning CUDA:
 - Solved reduce by key problem in naive kernel.
 - Completed Level-2: Reduction Patterns - Combining Data. Moving on to Level-3.
-- Solved Naive matrix transpose and observed the perfomance with nsight systems
-**Performance Breakdown**
-```
-Operation:        Matrix Transpose (1024×1024) Naive
-Kernel Time:      192 μs
-Achieved BW:      43.7 GB/s
-Efficiency:       14.7% of peak
-Bottleneck:       UNCOALESCED WRITES
+- solved Matrix transpose from naive to optimized versions and recorded their perfomances.
+### Performance Achieved
+- V1 (Naive): 43.7 GB/s (15% efficiency)
+- V2 (Shared): 240 GB/s (81% efficiency) → **5.5× speedup**
+- V3 (Padded): 271 GB/s (91% efficiency) → **6.2× speedup**
 
-Breakdown:
-  Read efficiency:   ~90% (coalesced)
-  Write efficiency:  ~3% (strided by 1024)
-  Average:           ~15% ✗
-```
-- solved matrix transpose with shared memory achieved 3X speedup than naive.
-- Optimized matrix transpose with padding and achieved 4X spedd than last one with shared memory.
+### Key Learnings
+1. Shared memory eliminates uncoalesced writes
+2. Block coordinate swapping is the key trick
+3. Padding avoids bank conflicts
+4. Proper benchmarking requires multiple run
