@@ -15,3 +15,4 @@ Breakdown:
   Write efficiency:  ~3% (strided by 1024)
   Average:           ~15% ✗
 ```
+- solved matrix transpose with shared memory achieved 3X speedup than naive.
