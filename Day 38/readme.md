@@ -7,4 +7,8 @@
     - Each thread loads 16 bytes
     - Warp loads 512 bytes
     - Served in 4 transactions
+- Implemented SOA vs AOS and understood the differences btw them. Here's the kernle timings btw them:
+    - AoS Kernel Time: 0.134240 ms
+    - SoA Kernel Time: 0.045664 ms
+    - SoA Effective Bandwidth: 183.702868 GB/s
 
