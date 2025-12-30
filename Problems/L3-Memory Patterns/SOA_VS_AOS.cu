@@ -30,15 +30,17 @@ int main(){
     int threadsPerblock = 256;
     int blocks = (N + threadsPerblock - 1) / threadsPerblock;
 
+    size_t aos_size = N * sizeof(Particle);
+
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     float ms = 0.0f;
 
     // AOS
-    Particle *h_aos = (Particle *)malloc(size);
+    Particle *h_aos = (Particle *)malloc(aos_size);
     Particle *d_aos;
-    cudaMalloc((void **)&d_aos, size);
+    cudaMalloc((void **)&d_aos, aos_size);
     for (int i=0; i<N; i++) { h_aos[i].x = 1.0f; h_aos[i].y = 2.0f; h_aos[i].z = 3.0f; }
     cudaMemcpy(d_aos, h_aos, size, cudaMemcpyHostToDevice);
 
