@@ -12,15 +12,14 @@ do { \
 
 __global__ void warmup(){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx == 0) printf("warmup complete.\n");
+    if (idx == 0) printf("Warmup complete.\n");
 }
 
-#define SHARED_MEM_SIZE 1024
+#define SHARED_SIZE 1024
 #define ITERATIONS 100000
 
-// kernel with no conflicts
 __global__ void KernelNoConflicts(float *out){
-    __shared__ float sdata[SHARED_MEM_SIZE];
+    __shared__ float sdata[SHARED_SIZE];
     int tid = threadIdx.x;
 
     sdata[tid] = (float)tid;
@@ -33,23 +32,22 @@ __global__ void KernelNoConflicts(float *out){
     out[tid] = val;
 }
 
-// kernel -2 : bank conflicts
 __global__ void KernelBankconflicts(float *out, int stride){
-    __shared__ float sdata[SHARED_MEM_SIZE * 32];
+    __shared__ float sdata[SHARED_SIZE]; 
     int tid = threadIdx.x;
+    int index = tid * stride; 
 
-    sdata[tid * stride] = (float)tid;
+    sdata[index] = (float)tid;
     __syncthreads();
 
     float val = 0.0f;
     for (int i=0; i<ITERATIONS; i++){
-        val += sdata[tid * stride];
+        val += sdata[index];
     }
     out[tid] = val;
 }
 
 int main() {
-
     warmup<<<1, 1>>>();
     CHECK(cudaDeviceSynchronize());
 
@@ -68,22 +66,20 @@ int main() {
     CHECK(cudaEventRecord(stop));
     CHECK(cudaEventSynchronize(stop));
     CHECK(cudaEventElapsedTime(&elapsed, start, stop));
-    printf("No Bank Conflict Time:   %.3f ms\n", elapsed);
+    printf("No Bank Conflict Time:    %.3f ms\n", elapsed);
 
-    // TEST 2: (2, 16, 32)-WAY CONFLICT
+    // TEST 2: STRIDED CONFLICTS
     int strides[] = {2, 16, 32};
-    int numtests = 3;
-    for (int s=0; s<numtests; s++){
+    for (int s=0; s<3; s++){
         int stride = strides[s];
         CHECK(cudaEventRecord(start));
         KernelBankconflicts<<<1, nThreads>>>(d_out, stride);
         CHECK(cudaEventRecord(stop));
         CHECK(cudaEventSynchronize(stop));
         CHECK(cudaEventElapsedTime(&elapsed, start, stop));
-        printf("%d-Way Bank Conflict Time: %.3f ms\n", stride, elapsed);
-
+        printf("Stride %d Conflict Time:   %.3f ms\n", stride, elapsed);
     }
-    // Cleanup
+
     CHECK(cudaFree(d_out));
     CHECK(cudaEventDestroy(start));
     CHECK(cudaEventDestroy(stop));
