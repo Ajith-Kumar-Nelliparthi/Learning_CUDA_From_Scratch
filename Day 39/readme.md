@@ -9,3 +9,4 @@
     - Stride 2 Conflict Time:   0.728 ms
     - Stride 16 Conflict Time:   0.700 ms
     - Stride 32 Conflict Time:   0.700 ms
+- Solved Matrix multiplication form naive to Shared memory and noted the differences btw them.
