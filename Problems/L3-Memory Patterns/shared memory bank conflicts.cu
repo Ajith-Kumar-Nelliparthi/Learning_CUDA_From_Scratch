@@ -50,24 +50,24 @@ __global__ void KernelBankconflicts(float *out, int stride){
 
 int main() {
 
-     warmup<<<1, 1>>>();
+    warmup<<<1, 1>>>();
     CHECK(cudaDeviceSynchronize());
-    
+
     int nThreads = 32;
     float *d_out;
     CHECK(cudaMalloc(&d_out, nThreads * sizeof(float)));
 
     cudaEvent_t start, stop;
     float elapsed;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+    CHECK(cudaEventCreate(&start));
+    CHECK(cudaEventCreate(&stop));
 
     // TEST 1: NO CONFLICT
-    cudaEventRecord(start);
+    CHECK(cudaEventRecord(start));
     KernelNoConflicts<<<1, nThreads>>>(d_out);
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&elapsed, start, stop);
+    CHECK(cudaEventRecord(stop));
+    CHECK(cudaEventSynchronize(stop));
+    CHECK(cudaEventElapsedTime(&elapsed, start, stop));
     printf("No Bank Conflict Time:   %.3f ms\n", elapsed);
 
     // TEST 2: (2, 16, 32)-WAY CONFLICT
@@ -75,18 +75,18 @@ int main() {
     int numtests = 3;
     for (int s=0; s<numtests; s++){
         int stride = strides[s];
-        cudaEventRecord(start);
+        CHECK(cudaEventRecord(start));
         KernelBankconflicts<<<1, nThreads>>>(d_out, stride);
-        cudaEventRecord(stop);
-        cudaEventSynchronize(stop);
-        cudaEventElapsedTime(&elapsed, start, stop);
+        CHECK(cudaEventRecord(stop));
+        CHECK(cudaEventSynchronize(stop));
+        CHECK(cudaEventElapsedTime(&elapsed, start, stop));
         printf("%d-Way Bank Conflict Time: %.3f ms\n", stride, elapsed);
 
     }
     // Cleanup
-    cudaFree(d_out);
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
+    CHECK(cudaFree(d_out));
+    CHECK(cudaEventDestroy(start));
+    CHECK(cudaEventDestroy(stop));
 
     return 0;
 }
