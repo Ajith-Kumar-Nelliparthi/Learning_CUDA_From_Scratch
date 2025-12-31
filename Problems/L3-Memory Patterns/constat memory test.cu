@@ -5,31 +5,27 @@
 do { \
     cudaError_t err = call; \
     if (err != cudaSuccess){ \
-        fprintf(stderr, "CUDA error in '%s' int line %i: %s.\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+        fprintf(stderr, "CUDA error in '%s' at line %i: %s.\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
         exit(EXIT_FAILURE); \
     } \
 } while(0)
 
-__global__ void warmup(){
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx == 0) printf("warmup complete.\n");
-}
-
 #define N 1024
 #define COEF_SIZE 16
 
-// constant memory declaration
+// Constant memory
 __constant__ float d_coeff[COEF_SIZE];
 
-// kernel using shared memory
-__global__ void multiplyconstantmemory(float *A, float *O, int coeffsize){
+// Kernel using constant memory
+__global__ void multiplyConstantMemory(float *A, float *O, int coeffsize){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx <N){
+    if (idx < N){
         int coeffIdx = idx % coeffsize;
         O[idx] = A[idx] * d_coeff[coeffIdx];
     }
 }
-// kernel using global memory
+
+// Kernel using global memory
 __global__ void multiplyGlobalMemory(const float *input, const float *coeff, float *output, int coeffSize) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < N) {
@@ -39,48 +35,55 @@ __global__ void multiplyGlobalMemory(const float *input, const float *coeff, flo
 }
 
 int main(){
-    float h_i[N], float h_o_const[N], float h_o_global[N];
-    float h_coeff[COEF_SIZE];
+    float h_i[N], h_o_const[N], h_o_global[N], h_coeff[COEF_SIZE];
     size_t size = N * sizeof(float);
 
-    // initalize inputs
+    // Initialize inputs
     for (int i=0; i<N; i++) h_i[i] = i * 0.5f;
     for (int i=0; i<COEF_SIZE; i++) h_coeff[i] = 1.0f + i;
 
-    // device memory
+    // Device memory pointers
     float *d_i, *d_o_const, *d_o_global, *d_coef_global;
-    cudaMalloc((void **)&d_i, size);
-    cudaMalloc((void **)&d_o_const, size);
-    cudaMalloc((void **)&d_o_global, size);
-    cudaMalloc((void **)&d_coef_global, COEF_SIZE * sizeof(float));
+    
+    CHECK(cudaMalloc((void **)&d_i, size));
+    CHECK(cudaMalloc((void **)&d_o_const, size));
+    CHECK(cudaMalloc((void **)&d_o_global, size));
+    CHECK(cudaMalloc((void **)&d_coef_global, COEF_SIZE * sizeof(float)));
 
-    cudaMemcpy(d_i, h_i, size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_coef_global, h_coeff, COEF_SIZE * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpyToSymbol(d_coeff, h_coeff, COEF_SIZE * sizeof(float));
+    // Copy data to device
+    CHECK(cudaMemcpy(d_i, h_i, size, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(d_coef_global, h_coeff, COEF_SIZE * sizeof(float), cudaMemcpyHostToDevice));
+    
+    // Copy to Constant Memory symbol
+    CHECK(cudaMemcpyToSymbol(d_coeff, h_coeff, COEF_SIZE * sizeof(float)));
 
     int threadsPerblock = 256;
     int blocks = (N + threadsPerblock - 1) / threadsPerblock;
 
-    multiplyconstantmemory<<<blocks, threadsPerblock>>>(d_i, d_o_const, COEF_SIZE);
+    // Launch Kernels
+    multiplyConstantMemory<<<blocks, threadsPerblock>>>(d_i, d_o_const, COEF_SIZE);
     multiplyGlobalMemory<<<blocks, threadsPerblock>>>(d_i, d_coef_global, d_o_global, COEF_SIZE);
+    
+    // Check for kernel launch errors
+    CHECK(cudaGetLastError());
+    CHECK(cudaDeviceSynchronize());
 
-    // Copy results back
-    cudaMemcpy(h_i, d_o_const, N * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_o_global, d_o_global, N * sizeof(float), cudaMemcpyDeviceToHost);
+    // Copy results back to correct host arrays
+    CHECK(cudaMemcpy(h_o_const, d_o_const, size, cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(h_o_global, d_o_global, size, cudaMemcpyDeviceToHost));
 
     // Verify correctness
-    printf("Index | Input | ConstMemOut | GlobalMemOut\n");
-    for (int i = 0; i < 16; i++) {
-        printf("%d | %.2f | %.2f | %.2f\n", i, h_i[i], h_o_const[i], h_o_global[i]);
+    printf("Idx | Input | ConstMemOut | GlobalMemOut\n");
+    printf("----------------------------------------\n");
+    for (int i = 0; i < 10; i++) {
+        printf("%02d  | %.2f  | %.2f      | %.2f\n", i, h_i[i], h_o_const[i], h_o_global[i]);
     }
 
-    // Cleanup
+    // Cleanup Device Memory
     cudaFree(d_i);
     cudaFree(d_o_const);
     cudaFree(d_o_global);
     cudaFree(d_coef_global);
-    free(h_i); free(h_o_const); free(h_o_global); free(h_coeff);
-
+    
     return 0;
-
 }
