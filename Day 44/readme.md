@@ -20,3 +20,4 @@ At a scale of 1 million elements, the GPU execution is IO-Bound. While the compu
 | Device-to-Host (4MB)  | 1.56 ms              | 2.13 ms                | +36.5%      |
 | Compute-to-IO Ratio   | ~1:21                | ~1:25                  | IO Dominant |
 ```
+- Solved stream Compaction in Hill-Steele method.
