@@ -3,9 +3,9 @@
 - Solved Segmented scan in block level wiht shared memory.
 
 ### Report: Performance Analysis of Segmented CUDA Scan
-Dataset Size:  (1,048,576) int32 elements
-Algorithm: Hillis-Steele Segmented Scan (Shared Memory Implementation)
-Hardware Profile: Measured via NVIDIA Nsight Systems (nsys)
+- Dataset Size:  (1,048,576) int32 elements
+- Algorithm: Hillis-Steele Segmented Scan (Shared Memory Implementation)
+- Hardware Profile: Measured via NVIDIA Nsight Systems (nsys)
 
 1. **Executive Summary**
 At a scale of 1 million elements, the GPU execution is IO-Bound. While the compute kernel is highly efficient (finishing in under 150 microseconds), the total execution time is dominated by memory transfers between the Host (CPU) and Device (GPU). The use of CUDA Streams and a "Warmup" kernel provides a more stable profiling environment and prepares the code for advanced latency-hiding techniques.
