@@ -3,6 +3,20 @@
 #include <stdlib.h>
 #include <time.h>
 
+#define CHECK(call) \
+do { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess){ \
+        fprintf(stderr, "cuda error in file '%s' at line %i : %s.\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+        exit(EXIT_FAILURE); \
+    } \
+}while(0)
+
+__global__ void warmup(){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx == 0) printf("warmup complete.\n");
+}
+
 __global__ void segmented_scan_block(const int* __restrict__ A,
                                      const int* __restrict__ flags,
                                      int* out, int n) {
@@ -49,7 +63,7 @@ __global__ void segmented_scan_block(const int* __restrict__ A,
 }
 
 int main() {
-    const int n = 1000;
+    const int n = 1 << 20;
     const int threadsPerBlock = 256;
     const int blocks = (n + threadsPerBlock - 1) / threadsPerBlock;
 
@@ -70,15 +84,22 @@ int main() {
     cudaMalloc(&d_flags, size);
     cudaMalloc(&d_out, size);
 
-    cudaMemcpy(d_A, h_A, size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_flags, h_flags, size, cudaMemcpyHostToDevice);
+    // create cuda streams
+    cudaStream_t stream;
+    CHECK(cudaStreamCreate(&stream));
+
+    // warmup
+    warmup<<< 1, 1, 0, stream>>>();
+
+    CHECK(cudaMemcpyAsync(d_A, h_A, size, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpyAsync(d_flags, h_flags, size, cudaMemcpyHostToDevice));
 
     // Shared memory size: 2 * threadsPerBlock * sizeof(int)
     size_t sharedMemSize = 2 * threadsPerBlock * sizeof(int);
 
     segmented_scan_block<<<blocks, threadsPerBlock, sharedMemSize>>>(d_A, d_flags, d_out, n);
-    cudaDeviceSynchronize();
-    cudaMemcpy(h_out, d_out, size, cudaMemcpyDeviceToHost);
+    CHECK(cudaStreamSynchronize(stream));
+    CHECK(cudaMemcpyAsync(h_out, d_out, size, cudaMemcpyDeviceToHost));
 
     // Print first 20 results
     printf("First 20 output values:\n");
@@ -88,7 +109,8 @@ int main() {
     printf("\n");
 
     // Cleanup
-    cudaFree(d_A); cudaFree(d_flags); cudaFree(d_out);
+    CHECK(cudaStreamDestroy(stream));
+    CHECK(cudaFree(d_A)); CHECK(cudaFree(d_flags)); CHECK(cudaFree(d_out));
     free(h_A); free(h_flags); free(h_out);
 
     return 0;
