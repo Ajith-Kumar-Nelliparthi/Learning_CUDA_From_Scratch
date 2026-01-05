@@ -21,8 +21,8 @@ __global__ void segmented_scan_block(const int* __restrict__ A,
 
     // Upsweep (Hillis-Steele style)
     for (int stride = 1; stride < blockDim.x; stride *= 2) {
-        int temp_val = 0;
-        int temp_flag = 0;
+        int temp_val = val;
+        int temp_flag = flag;
 
         if (tid >= stride) {
             int prev_val = shared[tid - stride];
