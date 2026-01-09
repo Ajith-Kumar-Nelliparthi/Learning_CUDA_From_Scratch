@@ -20,3 +20,10 @@
     - PCIe Transfer Bottleneck: Data movement between the Host and Device takes ~56 ms total, which is 53 times longer than the actual Gaussian blur calculation (1.05 ms).
     - High Bandwidth Utilization: Each output pixel relies on a 5-pixel neighborhood. While Shared Memory minimizes redundant global memory reads, the performance is still limited by the speed of the GPU's Global Memory (VRAM) rather than the processor's clock speed.
     - **Efficiency**: The kernel execution is highly efficient thanks to the shared memory "sliding window" approach, but the overall application performance is heavily constrained by data movement costs.
+
+- Solved 1D Heat Equation
+- **Report**:
+    - Kernel time: ~62.1 µs for 1M elements.
+    - Host→Device copy: ~0.75 ms (4.19 MB).
+    - Device→Host copy: ~1.57 ms (4.19 MB).
+- **Observation**: The system is heavily Memory Bound and IO Bound.
