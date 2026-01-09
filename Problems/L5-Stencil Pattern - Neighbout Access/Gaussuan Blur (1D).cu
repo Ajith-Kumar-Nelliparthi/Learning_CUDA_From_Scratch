@@ -1,6 +1,20 @@
 #include <stdio.h>
 #include <cuda_runtime.h>
 
+__global__ void warmup(){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx == 0) printf("warmup complete\n");
+}
+
+#define CHECK(call) \
+do{ \
+    cudaError_t err = call; \
+    if (err != cudaSuccess){ \
+        fprintf(stderr, "cuda error in '%s' at line %i : %s.\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while (0)
+
 __global__ void gaussian_blur(const int* __restrict__ in, int *out, int n){
     extern __shared__ int sdata[];
     int tid = threadIdx.x;
@@ -31,6 +45,8 @@ __global__ void gaussian_blur(const int* __restrict__ in, int *out, int n){
 }
 
 int main(){
+    warmup<<<1, 1>>>();
+
     const int n = 1 << 24;
     size_t size = n * sizeof(int);
     int threadsperblock = 256;
@@ -44,19 +60,19 @@ int main(){
     }
 
     int *d_i, *d_o;
-    cudaMalloc((void **)&d_i, size);
-    cudaMalloc((void **)&d_o, size);
+    CHECK(cudaMalloc((void **)&d_i, size));
+    CHECK(cudaMalloc((void **)&d_o, size));
 
-    cudaMemcpy(d_i, h_i, size, cudaMemcpyHostToDevice);
+    CHECK(cudaMemcpy(d_i, h_i, size, cudaMemcpyHostToDevice));
     gaussian_blur<<<blocks, threadsperblock, sharedmem>>>(d_i, d_o, n);
-    cudaDeviceSynchronize();
-    cudaMemcpy(h_o, d_o, size, cudaMemcpyDeviceToHost);
+    CHECK(cudaDeviceSynchronize());
+    CHECK(cudaMemcpy(h_o, d_o, size, cudaMemcpyDeviceToHost));
 
     for (int i=0; i<10; i++){
         printf("%d ", h_o[i]);
     }
 
-    cudaFree(d_i); cudaFree(d_o);
+    CHECK(cudaFree(d_i)); CHECK(cudaFree(d_o));
     free(h_i); free(h_o);
 
     return 0;
