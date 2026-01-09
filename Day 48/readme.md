@@ -1,0 +1,11 @@
+## Day 48 of learning CUDA:
+- Solved Box Filter (1D)
+- **Report**:
+    - Kernel time: ~65 µs for 1M elements.
+    - Host→Device copy: ~0.74 ms (4 MB).
+    - Device→Host copy: ~1.62 ms (4 MB).
+- **Observation**: The system is Memory Bound due to:
+    - Low arithmetic intensity (only 2 additions + 1 division per 3 memory loads).
+    - Global memory and PCIe transfer overhead dominating runtime compared to kernel execution.
+    - Each output requires multiple overlapping reads, so bandwidth becomes the limiting factor rather than compute.
+    - Kernel execution is efficient, but overall performance is constrained by data movement costs.
