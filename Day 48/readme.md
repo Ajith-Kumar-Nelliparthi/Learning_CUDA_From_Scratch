@@ -9,3 +9,14 @@
     - Global memory and PCIe transfer overhead dominating runtime compared to kernel execution.
     - Each output requires multiple overlapping reads, so bandwidth becomes the limiting factor rather than compute.
     - Kernel execution is efficient, but overall performance is constrained by data movement costs.
+
+- Solved Gaussian Blur (1D)
+- **Report**:
+    - Kernel time: ~1.05 ms for 16.7M elements.
+    - Host→Device copy: ~14.22 ms (67.11 MB).
+    - Device→Host copy: ~42.24 ms (67.11 MB).
+- **Observation**: The system is Memory Bound due to:
+    - Low arithmetic intensity: The kernel performs only a few integer multiplications and additions per pixel compared to the memory   overhead of loading and storing 4-byte integers.
+    - PCIe Transfer Bottleneck: Data movement between the Host and Device takes ~56 ms total, which is 53 times longer than the actual Gaussian blur calculation (1.05 ms).
+    - High Bandwidth Utilization: Each output pixel relies on a 5-pixel neighborhood. While Shared Memory minimizes redundant global memory reads, the performance is still limited by the speed of the GPU's Global Memory (VRAM) rather than the processor's clock speed.
+    - **Efficiency**: The kernel execution is highly efficient thanks to the shared memory "sliding window" approach, but the overall application performance is heavily constrained by data movement costs.
