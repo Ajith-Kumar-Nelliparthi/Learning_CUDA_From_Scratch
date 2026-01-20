@@ -72,9 +72,39 @@ int main(){
         float *temp = d_i; d_i = d_o; d_o = temp;
     }
     CHECK(cudaMemcpy(h_o, d_i, size, cudaMemcpyDeviceToHost));
+    /* To see the heat Spreading uncomment this line
+    FILE* fp = fopen("heat_data.bin", "wb");
+    if (fp) {
+        fwrite(h_out, sizeof(float), W * H, fp);
+        fclose(fp);
+        printf("Data saved to heat_data.bin\n");
+    }
+    */
     printf("2D Heat Simulation Complete. Sample Pixel [512,512]: %f\n", h_o[512*W+512]);
 
     cudaFree(d_i); cudaFree(d_o);
     free(h_i); free(h_o);
     return 0;
 }
+
+/* In new cell run this command
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 1. Load the binary data
+width, height = 1024, 1024
+data = np.fromfile("heat_data.bin", dtype=np.float32)
+data = data.reshape((height, width))
+
+# 2. Create the Heatmap
+plt.figure(figsize=(10, 8))
+plt.imshow(data, cmap='hot', interpolation='nearest')
+
+# 3. Add a color bar to show temperature scale
+plt.colorbar(label='Temperature')
+plt.title("2D Heat Equation Simulation")
+plt.xlabel("X Coordinate")
+plt.ylabel("Y Coordinate")
+
+plt.show()
+*/
