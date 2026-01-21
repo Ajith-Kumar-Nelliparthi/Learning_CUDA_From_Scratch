@@ -10,6 +10,11 @@ do { \
     } \
 } while (0)
 
+__global__ void warmup(){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx == 0) printf("Warmup done!\n");
+}
+
 #define K_SIZE 3
 #define R (K_SIZE / 2)
 #define BLOCK_SIZE 16
@@ -57,6 +62,11 @@ __global__ void convolution_2d(const float* __restrict__ in, float *out, int wid
 }
 
 int main(){
+
+    // warmup kernel to initialize CUDA context
+    warmup<<<1, 32>>>();
+    CHECK(cudaDeviceSynchronize());
+    
     const int W = 1024, H = 1024;
     size_t size = W * H * sizeof(float);
 
