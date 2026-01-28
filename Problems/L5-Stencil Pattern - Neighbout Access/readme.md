@@ -46,4 +46,4 @@ Solved a total of 10 Stencil Pattern problems.
 - Learn: State updates, complex boundary conditions.
 
 ### Summary
-This Level focused on Mastering Stencil Patterns in CUDA.
+This Level focused on Mastering Stencil Patterns in CUDA
