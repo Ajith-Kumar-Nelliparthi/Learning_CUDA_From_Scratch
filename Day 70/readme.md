@@ -2,3 +2,4 @@
 - Solved Tree Reduction vs Atomic Reduction
 - Observed that for 1M elements atomic condition is faster than tree reduction but larger arrays it's tree reduction scales better.
 - Memory allocation and transfers dominate runtime.
+- Solved Atomic Histogram and observed the difference btw global memory and shared memory atomic operations.
