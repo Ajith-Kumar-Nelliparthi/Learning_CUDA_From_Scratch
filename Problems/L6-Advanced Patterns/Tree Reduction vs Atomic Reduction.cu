@@ -8,6 +8,7 @@ __global__ void tree_reduction(int *data, int *result, int n){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     sdata[tid] = (idx < n) ? data[idx] : 0;
+    __syncthreads();
 
     for (int s=blockDim.x/2; s>0; s>>=1){
         if (tid < s){
@@ -37,7 +38,7 @@ int main(){
     int block = (n + threadsPerblock - 1) / threadsPerblock;
 
     int *h_data = (int *)malloc(size);
-    for (int i=0; i<n; i++) h_data[i] = rand() / RAND_MAX;
+    for (int i=0; i<n; i++) h_data[i] = rand();
 
     int *d_data, *d_result;
     cudaMalloc(&d_data, size);
