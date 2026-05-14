@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <cuda_runtime.h>
+#include <math.h>
+#include <math_constants.h>
 
 // ReLU activation function kernel
 __global__ void relu(float *in, float *out, int n) {
@@ -39,5 +41,22 @@ __global__ void Conv2D(float *input, float *kernel, float *output, int input_row
             }
         }
         output[row * (input_cols - kernel_cols + 1) + col] = sum;
+    }
+}
+
+// Softmax activation function kernel
+__global__ void softmax(float *in, float *out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float max_val = -FLT_MAX;
+        for (int i = 0; i<n; i++) {
+            max_val = fmaxf(max_val, in[i]);
+        }
+
+        float sum = 0.0f;
+        for (int i=0; i<n; i++) {
+            sum += expf(in[i] - max_val);
+        }
+        out[idx] = expf(in[idx] - max_val) / sum;
     }
 }
