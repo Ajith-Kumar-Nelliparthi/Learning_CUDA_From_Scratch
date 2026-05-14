@@ -16,3 +16,11 @@ __global__ void sigmoid(float *in, float *out, int n) {
         out[idx] = 1.0f / (1.0f + expf(-in[idx]));
     }
 }
+
+// TanH activation function kernel
+__global__ void tanh_activation(float *in, float *out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        out[idx] = tanhf(in[idx]);
+    }
+}
