@@ -100,3 +100,26 @@ __global__ void elementwise_add_fp16x8_kernel(half *a, half *b, half *c, int N) 
         }
     }
 }
+
+// elementwise fp16x8 pack kernel
+__global__ void elementwise_add_fp16x8_pack_kernel(half *a, half *b, half *c, int N) {
+    int idx = 8 * (blockIdx.x * blockDim.x + threadIdx.x);
+    if ((idx + 7) < N) {
+        // temprorary registers to hold the loaded data
+        half pack_a[8], pack_b[8], pack_c[8]; // 8 x fp16 values = 128 bits = 16 bytes
+        // reinterpret as float4 and load 128 bits at once
+        LDST128BITS(pack_a[0]) = LDST128BITS(a[idx]);
+        LDST128BITS(pack_b[0]) = LDST128BITS(b[idx]);
+
+        #pragma unroll
+        for (int i = 0; i < 8; i+=2) {
+            HALF2(pack_c[i]) = __hadd2(HALF2(pack_a[i]), HALF2(pack_b[i]));
+        }
+        // reinterpret as float4 and store 128 bits at memory at once
+        LDST128BITS(c[idx]) = LDST128BITS(pack_c[0]);
+    } else if (idx < N) {
+        for (int i = 0; (idx + i) < N; i++) {
+            c[idx + i] = __hadd(a[idx + i], b[idx + i]);
+        }
+    }
+}
