@@ -7,7 +7,7 @@
 - elementwise_add_f16x8_pack_kernel
 - PyTorch bindings
 
-### Benchmark Reults agains Pytorch
+### Benchmark Reults agains Pytorch conducted in Colab Tesla T4
 '''
 -------------------------------------------------------------------------------------
                                         S=1024, K=1024
