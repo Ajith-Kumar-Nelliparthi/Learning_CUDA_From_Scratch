@@ -1,9 +1,8 @@
 # Histogram Statistics
 ### 0x00 Explanation
 Includes the following:
-
-→ histogram_i32_kernel
-→ histogram_i32x4_kernel (int4 vectorized version)
+→ histogram_i32_kernel \
+→ histogram_i32x4_kernel (int4 vectorized version) \
 → PyTorch bindings
 
 ### Testing
