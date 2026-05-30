@@ -62,3 +62,141 @@ __global__ void sigmoid_f16_kernel(half *x, half *y, int N) {
         y[idx] = f / (f + hexp(-v));
     }
 }
+
+// fp16 x 2
+__global__ void sigmoid_f16x2_kernel(half *x, half *y, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const half f = __float2half(1.0f);
+    half2 reg_x = HALF2(x[idx]);
+    half2 reg_y;
+    reg_x.x = __hmin(__hmax(reg_x.x, MIN_EXP_F16), MAX_EXP_F16);
+    reg_x.y = __hmin(__hmax(reg_x.y, MIN_EXP_F16), MAX_EXP_F16);
+
+    reg_y.x = f / (f + hexp(-reg_x.x));
+    reg_y.y = f / (f + hexp(-reg_x.y));
+
+    if ((idx + 0) < N) {
+        HALF2(y[idx]) = reg_y;
+    }
+}
+
+// f16 x 8
+__global__ void sigmoid_f16x8_kernel(half *x, half *y, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const half f = __float2half(1.0f);
+
+    half2 reg_x_0 = HALF2(x[idx + 0]);
+    half2 reg_x_1 = HALF2(x[idx + 2]);
+    half2 reg_x_2 = HALF2(x[idx + 4]);
+    half2 reg_x_3 = HALF2(x[idx + 6]);
+
+    reg_x_0.x = __hmin(__hmax(reg_x_0.x, MIN_EXP_F16), MAX_EXP_F16);
+    reg_x_0.y = __hmin(__hmax(reg_x_0.y, MIN_EXP_F16), MAX_EXP_F16);
+    reg_x_1.x = __hmin(__hmax(reg_x_1.x, MIN_EXP_F16), MAX_EXP_F16);
+    reg_x_1.y = __hmin(__hmax(reg_x_1.y, MIN_EXP_F16), MAX_EXP_F16);
+    reg_x_2.x = __hmin(__hmax(reg_x_2.x, MIN_EXP_F16), MAX_EXP_F16);
+    reg_x_2.y = __hmin(__hmax(reg_x_2.y, MIN_EXP_F16), MAX_EXP_F16);
+    reg_x_3.x = __hmin(__hmax(reg_x_3.x, MIN_EXP_F16), MAX_EXP_F16);
+    reg_x_3.y = __hmin(__hmax(reg_x_3.y, MIN_EXP_F16), MAX_EXP_F16);
+
+    half2 reg_y_0, reg_y_1, reg_y_2, reg_y_3;
+
+    reg_y_0.x = f / (f + hexp(-reg_x_0.x));
+    reg_y_0.y = f / (f + hexp(-reg_x_0.y));
+    reg_y_1.x = f / (f + hexp(-reg_x_1.x));
+    reg_y_1.y = f / (f + hexp(-reg_x_1.y));
+    reg_y_2.x = f / (f + hexp(-reg_x_2.x));
+    reg_y_2.y = f / (f + hexp(-reg_x_2.y));
+    reg_y_3.x = f / (f + hexp(-reg_x_3.x));
+    reg_y_3.y = f / (f + hexp(-reg_x_3.y));
+
+    if (idx + 0 < N) {
+        HALF2(y[idx + 0]) = reg_y_0;
+    }
+    if (idx + 2 < N) {
+        HALF2(y[idx + 2]) = reg_y_1;
+    }
+    if (idx + 4 < N) {
+        HALF2(y[idx + 4]) = reg_y_2;
+    }
+    if (idx + 6 < N) {
+        HALF2(y[idx + 6]) = reg_y_3;
+    }
+}
+
+// fp16 x 8 pack kernel
+__global__ void sigmoid_f16x8_pack_kernel(half *x, half *y, int N) {
+    int idx = blockIdx.x * blodkDimx.x + threadIdx.x;
+    const half f = __float2half(1.0f);
+    // temprory memory to hold 8 half values
+    half pack_x[8], pack_y[8]; // 8 x 16 bits = 128 bits = 16 bytes
+    // reinterpret as float4 and load 8 half values in 2 float4 loads
+    LDST128BITS(pack_x[0]) = LDST128BITS(x[idx]); // load 128 bits (8 half values) from global memory
+
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        half v = __hmin(__hmax(pack_x[i], MIN_EXP_F16), MAX_EXP_F16);
+        pack_y[i] = f / (f + hexp(-v));
+    }
+    // reinterpret as float4 and store 8 half values in 2 float4 stores
+    if ((idx + 7) < N) {
+        LDST128BITS(y[idx]) = LDST128BITS(pack_y[0]); // store 128 bits (8 half values) to global memory
+    }
+}
+
+#define STRINGFY(str) #str
+#define TORCH_BINDING_COMMON_EXTENSION(func) \
+    m.def(STRINGFY(func), &func, STRINGFY(func));
+
+#define CHECK_TORCH_TENSOR_DTYPE(T, th_type) \
+    if (((T).options().dtype() != (th_type))) { \
+        std::cout << "Tensor Info:" << (T).options() << std::endl; \
+        throw std::runtime_error("Values must be " #th_type); \
+    }
+
+
+#define TORCH_BINDING_SIGMOID(packed_type, th_type, element_type, n_elements)  \
+  void sigmoid_##packed_type(torch::Tensor x, torch::Tensor y) {               \
+    CHECK_TORCH_TENSOR_DTYPE(x, (th_type))                                     \
+    CHECK_TORCH_TENSOR_DTYPE(y, (th_type))                                     \
+    const int ndim = x.dim();                                                  \
+    if (ndim != 2) {                                                           \
+      int N = 1;                                                               \
+      for (int i = 0; i < ndim; ++i) {                                         \
+        N *= x.size(i);                                                        \
+      }                                                                        \
+      dim3 block(256 / (n_elements));                                          \
+      dim3 grid((N + 256 - 1) / 256);                                          \
+      sigmoid_##packed_type##_kernel<<<grid, block>>>(                         \
+          reinterpret_cast<element_type *>(x.data_ptr()),                      \
+          reinterpret_cast<element_type *>(y.data_ptr()), N);                  \
+    } else {                                                                   \
+      const int S = x.size(0);                                                 \
+      const int K = x.size(1);                                                 \
+      const int N = S * K;                                                     \
+      if ((K / (n_elements)) <= 1024) {                                        \
+        dim3 block(K / (n_elements));                                          \
+        dim3 grid(S);                                                          \
+        sigmoid_##packed_type##_kernel<<<grid, block>>>(                       \
+            reinterpret_cast<element_type *>(x.data_ptr()),                    \
+            reinterpret_cast<element_type *>(y.data_ptr()), N);                \
+      } else {                                                                 \
+        int N = 1;                                                             \
+        for (int i = 0; i < ndim; ++i) {                                       \
+          N *= x.size(i);                                                      \
+        }                                                                      \
+        dim3 block(256 / (n_elements));                                        \
+        dim3 grid((N + 256 - 1) / 256);                                        \
+        sigmoid_##packed_type##_kernel<<<grid, block>>>(                       \
+            reinterpret_cast<element_type *>(x.data_ptr()),                    \
+            reinterpret_cast<element_type *>(y.data_ptr()), N);                \
+      }                                                                        \
+    }                                                                          \
+  }
+
+TORCH_BINDING_SIGMOID(f32, torch::kFloat32, float, 1)
+TORCH_BINDING_SIGMOID(f32x4, torch::kFloat32, float, 4)
+TORCH_BINDING_SIGMOID(f16, torch::kHalf, half, 1)
+TORCH_BINDING_SIGMOID(f16x2, torch::kHalf, half, 2)
+TORCH_BINDING_SIGMOID(f16x8, torch::kHalf, half, 8)
+TORCH_BINDING_SIGMOID(f16x8_pack, torch::kHalf, half, 8)
