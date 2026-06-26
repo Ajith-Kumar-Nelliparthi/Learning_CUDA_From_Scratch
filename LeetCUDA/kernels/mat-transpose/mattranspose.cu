@@ -54,3 +54,34 @@ __global__ void mat_transpose_f32x4_col2row_kernel(float *x, float *y, const int
         y[(gloabl_col + 3) * row + global_row] = x_val.y;
     }
 }
+
+__global__ void mat_transpose_f32x4_row2col_kernel(float *x, float *y, const int row, const int col) {
+    int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int global_col = (global_idx * 4) / row;
+    int global_row = (global_idx * 4) % row;
+
+    if (global_row < row && global_col < col) {
+        float4 x_val
+        x_val.x = x[global_row * col + global_col];
+        x_val.y = x[(global_row + 1) * col + global_col];
+        x_val.w = x[(global_row + 2) * col + global_col];
+        x_val.z = x[(global_row + 3) * col + global_col];
+        reinterpret_cast<float4 *>(y)[global_idx] = FLOAT4(x_val);
+    }
+}
+
+__global__ void mat_transpose_f32_col2row2d_kernel(float *x, float *y, const int row, const int col) {
+    const int global_x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int global_y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (global_x < col && global_y < row) {
+        y[global_x * row + global_y] = x[global_y * col + global_x]
+    }
+}
+
+__global__ void mat_transpose_f32_row2col2d_kernel(float *x, float *y, const int row, const int col) {
+    const int global_x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int global_y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (global_y < col && global_x < row) {
+        y[global_y * row + global_x] = x[global_x * col + global_y];
+    }
+}
