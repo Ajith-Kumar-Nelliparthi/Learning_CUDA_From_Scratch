@@ -85,3 +85,30 @@ __global__ void mat_transpose_f32_row2col2d_kernel(float *x, float *y, const int
         y[global_y * row + global_x] = x[global_x * col + global_y];
     }
 }
+
+__global__ void mat_transpose_f32x4_shared_col2row2d_kernel(float *x, float *y, const int row, const int col) {
+    const int global_x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int global_y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int local_x = threadIdx.x;
+    const int local_y = threadIdx.y;
+    __shared__ float tile[WARP_SIZE_S][WARP_SIZE_S * 4];
+    // step 1: index calculation
+    if (global_x * 4 + 3 < col + 3 && global_y < row) {
+        // load value from x to shared memory
+        float4 x_val = reinterpret_cast<float4 *>(x)[global_y * col / 4 + global_x];
+        FLOAT4(tile[local_y][local_x * 4]) = FLOAT4(x_val);
+        __syncthreads();
+        float4 smem_val;
+        // load value from stride mem to y
+        constexpr int STRIDE = WARP_SIZE_S / 4;
+        smem_val.x = tile[(local_y % STRIDE) * 4][local_x * 4 + local_y / STRIDE];
+        smem_val.y = tile[(local_y % STRIDE) * 4 + 1][local_x * 4 + local_y / STRIDE];
+        smem_val.y = tile[(local_y % STRIDE) * 4 + 2][local_x * 4 + local_y / STRIDE];
+        smem_val.y = tile[(local_y % STRIDE) * 4 + 3][local_x * 4 + local_y / STRIDE];
+        
+        const int bid_y = blockIdx.y * blockDim.y;
+        const int out_y = global_x * 4 + local_y / STRIDE;
+        const int out_x = (local_y % STRIDE) * 4 + bid_y;
+        reinterpret_cast<float4 *>(y)[(out_y * row + out_x) / 4] = FLOAT4(smem_val);
+    }
+}
