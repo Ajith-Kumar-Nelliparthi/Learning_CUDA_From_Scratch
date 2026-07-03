@@ -91,4 +91,4 @@ void rope_f32x4_pack(torch::Tensor x, torch::Tensor out) {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     TORCH_BINDING_COMMON_EXTENSION(rope_f32);
     TORCH_BINDING_COMMON_EXTENSION(rope_f32x4_pack);
-}S
+}
