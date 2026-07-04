@@ -164,3 +164,40 @@ __global__ void dot_product_f16x2_f32_kernel(half *a, half *b, float *y, int N) 
     if (tid == 0)
         atomicAdd(y, prod);
 }
+
+// fp 16 x 8
+template <const int NUM_THREADS = 256 / 8>
+__global__ void dot_product_f16x8_f32_kernel(half *a, half *b, float *y, int N) {
+    int tid = threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x + tid) * 8;
+    constexpr int NUM_WARPS = (NUM_THREADS + WARP_SIZE - 1) / WARP_SIZE;
+    __shared__ float smem[NUM_WARPS];
+    // temprorary register to hold the 8 half values
+    half pack_a[8], pack_b[8];                         // 8 x 16 bits = 128 bits
+    LDST128BITS(pack_a[0]) = LDST128BITS(a[idx]);      // load 128 bits from global memory to register
+    LDST128BITS(pack_b[0]) = LDST128BITS(b[idx]);      // load 128 bits from global memory to register
+    const half z = __float2half(0.0f);
+
+    half prod_f16 = z;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        half2 v = __hmul2(HALF2(pack_a[i]), HALF2(pack_b[i]));
+        prod_f16 += (((idx + i) < N) ? (v.x + v.y) : z);
+    }
+
+    int warp_id = tid / WARP_SIZE;
+    int lane_id = tid % WARP_SIZE;
+    float prod = warp_reduce_sum_f16_f32<WARP_SIZE>(prod_f16);
+    // write to shared memory
+    if (lane_id == 0) {
+        smem[warp_id] = prod;
+    }
+    __syncthreads();
+
+    // reduce the shared memory
+    prod = (lane_id < NUM_WARPS) ? smem[lane_id] : 0.0f;
+    if (warp_id == 0)
+        prod = warp_reduce_sum_f32<NUM_WARPS>(prod);
+    if (tid == 0)
+        atomicAdd(y, prod);
+}
