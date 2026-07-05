@@ -7,8 +7,8 @@ torch.set_grad_enabled(False)
 
 # load the cuda kernel as a python module
 lib = load(
-    name="relu_lib",
-    sources=["relu.cu"],
+    name="dot_product_lib",
+    sources=["dot_product.cu"],
     extra_cuda_cflags=[
         "-O3",
         "-U__CUDA_NO_HALF_OPERATORS__",
