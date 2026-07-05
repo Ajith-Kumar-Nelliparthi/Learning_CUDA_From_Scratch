@@ -116,7 +116,7 @@ __global__ void dot_product_f16_f32_kernel(half *a, half *b, float *y, int N) {
     __shared__ float smem[NUM_WARPS];
 
     // keep the data in registers as much as possible
-    half prod_f16 = [idx < N] ? __hmul(a[idx], b[idx]) : __float2half(0.0f);
+    half prod_f16 = (idx < N) ? __hmul(a[idx], b[idx]) : __float2half(0.0f);
     int warp_id = tid / WARP_SIZE;
     int lane_id = tid % WARP_SIZE;
     // warp reduce
