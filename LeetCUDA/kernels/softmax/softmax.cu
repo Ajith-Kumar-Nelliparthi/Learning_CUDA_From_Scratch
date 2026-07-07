@@ -103,3 +103,41 @@ __device__ float block_reduce_max_f32(float val) {
     value = __shfl_sync(0xffffffff, value, 0, 32);
     return value;
 }
+
+template <const int NUM_THREADS = 256>
+__global__ void softmax_f32_per_token_kernel(float *x, float *y, int N) {
+    const int tid = threadIdx.x;
+    const int idx = blockIdx.x * blockDim.x + tid;
+
+    float exp_val = (idx < N) ? expf(x[idx]) : 0;
+    float exp_sum = block_reduce_sum_f32<NUM_THREADS>(exp_val);
+
+    if (idx < N) {
+        y[idx] = exp_val / exp_sum;
+    }
+}
+
+template <const int NUM_THREADS = 256>
+__global__ void softmax_f32x4_per_token_kernel(float *x, float *y, int N) {
+    const int tid = threadIdx.x;
+    const int idx = 4 * (blockIdx.x * blockDim.x + tid);
+    
+    float4 reg_x = FLOAT4(x[idx]);
+    float4 reg_exp;
+    reg_exp.x = (idx + 0 < N) ? expf(reg_x.x) : 0.0f;
+    reg_exp.y = (idx + 1 < N) ? expf(reg_x.y) : 0.0f;
+    reg_exp.w = (idx + 2 < N) ? expf(reg_x.w) : 0.0f;
+    reg_exp.z = (idx + 3 < N) ? expf(reg_x.z) : 0.0f;
+
+    float exp_val = (reg_exp.x + reg_exp.y + reg_exp.w + reg_exp.z);
+    float exp_sum = block_reduce_sum_f32<NUM_THREADS>(exp_val);
+
+    if (idx + 3 < N) {
+        float4 reg_y;
+        reg_y.x = reg_exp.x / (exp_sum);
+        reg_y.y = reg_exp.y / (exp_sum);
+        reg_y.w = reg_exp.w / (exp_sum);
+        reg_y.z = reg_exp.z / (exp_sum);
+        FLOAT4(y[idx]) = reg_y;
+    }
+}
