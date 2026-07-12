@@ -143,3 +143,18 @@ __device__ half block_reduce_sum_f16_f16(half val) {
     val = warp_reduce_sum_f16_f16<NUM_WARPS>(val);
     return val;
 }
+
+template <const int NUM_THREADS = 256>
+__device__ float block_reduce_sum_f16_f32(half val) {
+    constexpr NUM_WARPS = (NUM_THREADS + WARP_SIZE - 1) / WARP_SIZE;
+    int warp = threadIdx.x / WARP_SIZE;
+    int lane = threadIdx.x % WARP_SIZE;
+    static __shared__ float shared[NUM_WARPS];
+    float val_f32 = warp_reduce_sum_f16_f32<WARP_SIZE>(val);
+    if (lane == 0) shared[warp] = val_f32;
+    __syncthreads();
+
+    val_f32 = (lane < NUM_WARPS) ? shared[lane] : 0.0f;
+    val_f32 = warp_reduce_sum_f32<NUM_WARPS>(val_f32);
+    return val_f32;
+}
