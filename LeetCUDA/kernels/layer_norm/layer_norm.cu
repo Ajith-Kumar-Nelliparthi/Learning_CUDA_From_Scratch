@@ -297,3 +297,27 @@ __global__ void layer_norm_f16x8_f16_kernel(half *x, half *y, float g, float b, 
         HALF2(y[idx + 6]) = reg_y_3;
     }
 }
+
+template <const int NUM_THREADS = 256>
+__global__ void layer_norm_f16_f32_kernel(half *x, half *y, float g, float b, int N, int K) {
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+    int idx = bid * blockDim.x + tid;
+    const float epsilon = 1e-5f;
+
+    __shared__ float s_mean;
+    __shared__ float s_var;
+    float value = (idx < N * K) ? __half2float(x[idx]) : 0.0f;
+    float sum = block_reduce_sum_f32<NUM_THREADS>(value);
+    if (tid == 0) s_mean = sum / (float)K;
+    __syncthreads();
+
+    float variance = (value - s_mean) * (value - s_mean);
+    variance = block_reduce_sum_f32<NUM_THREADS>(variance);
+    if (tid == 0) s_var = rsqrtf(variance / (float)K + epsilon);
+    __syncthreads();
+
+    if (idx < N * K) {
+        y[idx] = __float2half(__fmaf_rn(((value - s_mean) * s_var), g, b));
+  }
+}
