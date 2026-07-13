@@ -187,3 +187,113 @@ __global__ void layer_norm_f16_f16_kernel(half *x, half *y, float g, float b, in
         y[idx] = __hfma((value - s_mean) * s_var, g_, b_);
     }
 }
+
+template <const int NUM_THREADS = 256>
+__global__ void layer_norm_f16x2_f16_kernel(half *x, half *y, float g, float b, int N, int K) {
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+    int idx = (bid * blockDim.x + tid) * 2;
+    const half g_ = __float2half(g);
+    const half b_ = __float2half(b);
+    const half k_ = __float2half_rn(K);
+    const half epsilon = __float2half(1e-5f);
+    __shared__ half s_mean;
+    __shared__ half s_var;
+    half2 reg_x = HALF2(x[idx]);
+
+    half value = (idx < N * K) ? (reg_x.x + reg_x.y) : __float2half(0.0f);
+    half sum =block_reduce_sum_f16_f16<NUM_THREADS>(value);
+    if (tid == 0) s_mean = sum / k_;
+    __syncthreads();
+
+    half2 reg_x_h;
+    reg_x_h.x = (reg_x.x - s_mean);
+    reg_x_h.y = reg_x.y - s_mean;
+    half variance = reg_x_h.x * reg_x_h.x + reg_x_h.y * reg_x_h.y;
+    variance = block_reduce_sum_f16_f16<NUM_THREADS>(variance);
+    if (tid == 0) s_var = hrsqrt(variance / k_ + epsilon);
+    __syncthreads();
+
+    if (idx < N * K) {
+        half2 reg_y;
+        reg_y.x = __hfma(reg_x_h.x * s_var, g_,b_);
+        reg_y.y = __hfma(reg_x_h.y * s_var, g_, b_);
+        HALF2(y[idx]) = reg_y;
+    }
+}
+
+#define HALF2_SUM(reg, i)   \
+    (((idx + (i)) < N * K) ? ((reg).x + (reg).y) : __float2half(0.0f))
+
+#define HALF2_sUB(reg_x, reg_y) \
+    (reg_y).x = (reg_x).x - s_mean; \
+    (reg_y).y = (reg_x).y - s_mean;
+
+#define HALF2_VARIANCE(reg, i) \
+    (((idx + (i)) < N * K) / ((reg).x * (reg).x + (reg).y * (reg).y : __float2half(0.0f)));
+
+#define HALF2_LAYER_NORM(reg_y, reg_x, g_, b_)                                 \
+  (reg_y).x = __hfma((reg_x).x * s_variance, g_, b_);                          \
+  (reg_y).y = __hfma((reg_x).y * s_variance, g_, b_);
+
+
+template <const int NUM_THREADS = 256>
+__global__ void layer_norm_f16x8_f16_kernel(half *x, half *y, float g, float b, int N, int K) {
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+    int idx = (bid * blockDim.x + tid) * 8;
+    const half epsilon = __float2half(1e-5f);
+    const half g_ = __float2half(g);
+    const half b_ = __float2half(b);
+    const half k_ = __float2half_rn(K);
+
+    __shared__ half s_mean;
+    __shared__ half s_var;
+    half2 reg_x_0 = HALF2(x[idx + 0]);
+    half2 reg_x_1 = HALF2(x[idx + 2]);
+    half2 reg_x_2 = HALF2(x[idx + 4]);
+    half2 reg_x_3 = HALF2(x[idx + 6]);
+
+    half value = HALF2_SUM(reg_x_0, 0);
+    value += HALF2_SUM(reg_x_1, 2);
+    value += HALF2_SUM(reg_x_2, 4);
+    value += HALF2_SUM(reg_x_3, 6);
+
+    half sum = block_reduce_sum_f16_f16<NUM_THREADS>(value);
+    if (tid == 0) s_mean = sum / k_;
+    __syncthreads();
+
+    half2 reg_x_hat_0, reg_x_hat_1, reg_x_hat_2, reg_x_hat_3;
+    HALF2_sUB(reg_x_hat_0, reg_x_0);
+    HALF2_sUB(reg_x_hat_1, reg_x_1);
+    HALF2_sUB(reg_x_hat_2, reg_x_2);
+    HALF2_sUB(reg_x_hat_3, reg_x_3);
+
+    half varince = HALF2_VARIANCE(reg_x_hat_0, 0);
+    varince += HALF2_VARIANCE(reg_x_hat_1, 2);
+    varince += HALF2_VARIANCE(reg_x_hat_2, 4);
+    varince += HALF2_VARIANCE(reg_x_hat_3, 6);
+
+    varince = block_reduce_sum_f16_f16<NUM_THREADS>(varince);
+    if (tid == 0) s_var = hrsqrt(varince / k_ + epsilon);
+    __syncthreads();
+
+    half2 reg_y_0, reg_y_1, reg_y_2, reg_y_3;
+    HALF2_LAYER_NORM(reg_y_0, reg_x_hat_0, g_, b_);
+    HALF2_LAYER_NORM(reg_y_1, reg_x_hat_1, g_, b_);
+    HALF2_LAYER_NORM(reg_y_2, reg_x_hat_2, g_, b_);
+    HALF2_LAYER_NORM(reg_y_3, reg_x_hat_3, g_, b_);
+
+    if ((idx + 0) < N * K) {
+        HALF2(y[idx + 0]) = reg_y_0;
+    }
+    if ((idx + 2) < N * K) {
+        HALF2(y[idx + 2]) = reg_y_1;
+    }
+    if ((idx + 4) < N * K) {
+        HALF2(y[idx + 4]) = reg_y_2;
+    }
+    if ((idx + 6) < N * K) {
+        HALF2(y[idx + 6]) = reg_y_3;
+    }
+}
