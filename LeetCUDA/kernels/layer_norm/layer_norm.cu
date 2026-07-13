@@ -158,3 +158,32 @@ __device__ float block_reduce_sum_f16_f32(half val) {
     val_f32 = warp_reduce_sum_f32<NUM_WARPS>(val_f32);
     return val_f32;
 }
+
+template <const int NUM_THREADS = 256>
+__global__ void layer_norm_f16_f16_kernel(half *x, half *y, float g, float b, int N, int K) {
+    const int tid = threadIdx.x;
+    const int bid = blockIdx.x;
+    int idx = bid * blockDim.x + tid;
+    const half epsilon = __float2half(1e-5f);
+    const half g_ = __float2half(g);
+    const half b_ = __float2half(b);
+    const half k_ = __int2half_rn(K);
+    
+    // const int NUM_WARPS = (NUM_THREADS + WARP_SIZE - 1) / WARP_SIZE;
+    __shared__ half s_mean;
+    __shared__ half s_var;
+
+    half value = (idx < N * K) ? x[idx] : __float2half(0.0f);
+    half sum = block_reduce_sum_f16_f16<NUM_THREADS>(value);
+    if (tid == 0) s_mean = sum / k_;
+    __syncthreads();
+
+    half variance = (value - s_mean) * (value - s_mean);
+    variance = block_reduce_sum_f16_f16<NUM_THREADS>(variance);
+    if (tid == 0) s_var = hrsqrt(variance / k_ + epsilon);
+    __syncthreads();
+
+    if (idx < N * k) {
+        y[idx] = __hfma((value - s_mean) * s_var, g_, b_);
+    }
+}
