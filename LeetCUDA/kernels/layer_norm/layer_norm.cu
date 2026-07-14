@@ -104,7 +104,7 @@ __global__ void layer_norm_f32x4_kernel(float *x, float *y, float g, float b, in
     reg_y.w = reg_var.w * s_var * g + b;
     reg_y.z = reg_var.z * s_var * g + b;
     if (idx < N * K) {
-        float4(y[idx]) = reg_y;
+        FLOAT4(y[idx]) = reg_y;
     }
 }
 
@@ -124,7 +124,7 @@ __device__ __forceinline__ float warp_reduce_sum_f16_f32(half val) {
     float val_f32 = __half2float(val);
 #pragma unroll
     for (int mask = kwarpSize >> 1; mask >= 1; mask >>= 1) {
-        val_f32 += __shfl_xor_sync(0xffffffff, val, mask);
+        val_f32 += __shfl_xor_sync(0xffffffff, val_f32, mask);
     }
     return val_f32;
 }
@@ -146,7 +146,7 @@ __device__ half block_reduce_sum_f16_f16(half val) {
 
 template <const int NUM_THREADS = 256>
 __device__ float block_reduce_sum_f16_f32(half val) {
-    constexpr NUM_WARPS = (NUM_THREADS + WARP_SIZE - 1) / WARP_SIZE;
+    constexpr int NUM_WARPS = (NUM_THREADS + WARP_SIZE - 1) / WARP_SIZE;
     int warp = threadIdx.x / WARP_SIZE;
     int lane = threadIdx.x % WARP_SIZE;
     static __shared__ float shared[NUM_WARPS];
@@ -183,7 +183,7 @@ __global__ void layer_norm_f16_f16_kernel(half *x, half *y, float g, float b, in
     if (tid == 0) s_var = hrsqrt(variance / k_ + epsilon);
     __syncthreads();
 
-    if (idx < N * k) {
+    if (idx < N * K) {
         y[idx] = __hfma((value - s_mean) * s_var, g_, b_);
     }
 }
@@ -225,16 +225,16 @@ __global__ void layer_norm_f16x2_f16_kernel(half *x, half *y, float g, float b, 
 #define HALF2_SUM(reg, i)   \
     (((idx + (i)) < N * K) ? ((reg).x + (reg).y) : __float2half(0.0f))
 
-#define HALF2_sUB(reg_x, reg_y) \
-    (reg_y).x = (reg_x).x - s_mean; \
-    (reg_y).y = (reg_x).y - s_mean;
+#define HALF2_SUB(reg_y, reg_x)                                                \
+  (reg_y).x = (reg_x).x - s_mean;                                              \
+  (reg_y).y = (reg_x).y - s_mean;
 
 #define HALF2_VARIANCE(reg, i) \
-    (((idx + (i)) < N * K) / ((reg).x * (reg).x + (reg).y * (reg).y : __float2half(0.0f)));
+    (((idx + (i)) < N * K) ? ((reg).x * (reg).x + (reg).y * (reg).y) : __float2half(0.0f));
 
 #define HALF2_LAYER_NORM(reg_y, reg_x, g_, b_)                                 \
-  (reg_y).x = __hfma((reg_x).x * s_variance, g_, b_);                          \
-  (reg_y).y = __hfma((reg_x).y * s_variance, g_, b_);
+  (reg_y).x = __hfma((reg_x).x * s_var, g_, b_);                          \
+  (reg_y).y = __hfma((reg_x).y * s_var, g_, b_);
 
 
 template <const int NUM_THREADS = 256>
@@ -330,7 +330,7 @@ __global__ void layer_norm_f16x8_pack_f16_kernel(half *x, half *y, float g, floa
     const half epsilon = __float2half(1e-5f);
     const half g_ = __float2half(g);
     const half b_ = __float2half(b);
-    const half k_ = __float2half2_rn(K);
+    const half k_ = __float2half_rn(K);
     const half z_ = __float2half(0.0f);
 
     __shared__ half s_mean;
@@ -352,10 +352,10 @@ __global__ void layer_norm_f16x8_pack_f16_kernel(half *x, half *y, float g, floa
 #pragma unroll
     for (int i=0; i<8; i++) {
         half v_hat = pack_x[i] - s_mean;
-        var += ((idx + i) < N * k ? v_hat * v_hat : z_);
+        var += ((idx + i) < N * K ? v_hat * v_hat : z_);
     }
     var = block_reduce_sum_f16_f16<NUM_THREADS>(var);
-    if (tid == 0) s_var = rsqrtf(var / k_ + epsilon);
+    if (tid == 0) s_var = hrsqrt(var / k_ + epsilon);
     __syncthreads();
 
 #pragma unroll
@@ -372,7 +372,7 @@ __global__ void layer_norm_f16x8_pack_f32_kernel(half *x, half *y, float g, floa
     int tid = threadIdx.x;
     int bid = blockIdx.x;
     int idx = (bid * blockDim.x + tid) * 8;
-    const half epsilon = 1e-5f;
+    const float epsilon = 1e-5f;
 
     __shared__ float s_mean;
     __shared__ float s_var;
