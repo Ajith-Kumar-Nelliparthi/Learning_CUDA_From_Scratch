@@ -321,3 +321,48 @@ __global__ void layer_norm_f16_f32_kernel(half *x, half *y, float g, float b, in
         y[idx] = __float2half(__fmaf_rn(((value - s_mean) * s_var), g, b));
   }
 }
+
+template <const int NUM_THREADS = 256>
+__global__ void layer_norm_f16x8_pack_f16_kernel(half *x, half *y, float g, float b, int N, int K) {
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+    int idx = (bid * blockDim.x + tid) * 8;
+    const half epsilon = __float2half(1e-5f);
+    const half g_ = __float2half(g);
+    const half b_ = __float2half(b);
+    const half k_ = __float2half2_rn(K);
+    const half z_ = __float2half(0.0f);
+
+    __shared__ half s_mean;
+    __shared__ half s_var;
+
+    half pack_x[8], pack_y[8]; // 8x16 bits = 128 bits
+    LDST128BITS(pack_x[0]) = LDST128BITS(x[idx]); // load 128 bits
+
+    half value = z_;
+#pragma unroll
+    for (int i = 0; i<8; ++i) {
+        value += ((idx + i) < N * K ? pack_x[i] : z_);
+    }
+    half sum = block_reduce_sum_f16_f16<NUM_THREADS>(value);
+    if (tid == 0) s_mean = sum / k_;
+    __syncthreads();
+
+    half var = z_;
+#pragma unroll
+    for (int i=0; i<8; i++) {
+        half v_hat = pack_x[i] - s_mean;
+        var += ((idx + i) < N * k ? v_hat * v_hat : z_);
+    }
+    var = block_reduce_sum_f16_f16<NUM_THREADS>(var);
+    if (tid == 0) s_var = rsqrtf(var / k_ + epsilon);
+    __syncthreads();
+
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        pack_y[i] = __hfma((pack_x[i] - s_mean) * s_var, g_, b_);
+    }
+    if ((idx + 7) < N * K) {
+        LDST128BITS(y[idx]) = LDST128BITS(pack_y[0]);
+    }
+}
