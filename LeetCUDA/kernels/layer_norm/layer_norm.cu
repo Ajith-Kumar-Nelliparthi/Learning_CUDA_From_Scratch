@@ -225,7 +225,7 @@ __global__ void layer_norm_f16x2_f16_kernel(half *x, half *y, float g, float b, 
 #define HALF2_SUM(reg, i)   \
     (((idx + (i)) < N * K) ? ((reg).x + (reg).y) : __float2half(0.0f))
 
-#define HALF2_SUB(reg_y, reg_x)                                                \
+#define HALF2_sUB(reg_y, reg_x)                                                \
   (reg_y).x = (reg_x).x - s_mean;                                              \
   (reg_y).y = (reg_x).y - s_mean;
 
