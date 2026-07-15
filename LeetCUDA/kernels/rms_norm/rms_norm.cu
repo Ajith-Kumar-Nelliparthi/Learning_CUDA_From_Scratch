@@ -84,4 +84,59 @@ __global__ void rms_norm_f32x4_kernel(float *x, float *y, int g, int N, int K) {
     reg_y.z = reg_x.z * s_var + g;
     reg_y.w = reg_x.w * s_var + g;
     if (idx < N * K) FLOAT4(y[idx]) = reg_y;
-} 
+}
+
+// fp 16
+// warp reduce sum f16
+template <const int kwarpSize = WARP_SIZE>
+__device__ __forceinline__ half warp_reduce_sum_f16_f16(half val) {
+#pragma unroll
+    for (int mask = kwarpSize >> 1; mask >= 1; mask >>= 1) {
+        val += __shfl_xor_sync(0xffffffff, val, mask);
+    }
+    return val;
+}
+
+template <const int kwarpSize = WARP_SIZE>
+__device__ __forceinline__ float warp_reduce_sum_f32_f16(half val) {
+    float val_f32 = __half2float(val);
+#pragma unroll
+    for (int mask = kwarpSize >> 1; mask >= 1; mask >>= 1) {
+        val_f32 += __shfl_xor_sync(0xffffffff, val_f32, mask);
+    }
+    return val_f32;
+}
+
+// block reduce sum
+template <const int NUM_THREADS = 256>
+__device__ __forceinline__ half block_reduce_sum_f16_f16_kernel(half val) {
+    int tid = threadIdx.x;
+    int warp = tid / WARP_SIZE;
+    int lane = tid % WARP_SIZE;
+    constexpr int NUM_WARPS = (NUM_THREADS + WARP_SIZE - 1) / WARP_SIZE;
+    static __shared__ half shared[NUM_WARPS];
+
+    val = warp_reduce_sum_f16_f16<WARP_SIZE>(val);
+    if (lane == 0) shared[warp] = val;
+    __syncthreads();
+
+    val = (lane < NUM_WARPS) ? shared[lane] : __float2half(0.0f);
+    val = warp_reduce_sum_f16_f16<NUM_WARPS>(val);
+    return val;
+}
+
+template <const int NUM_THREADS = 256>
+__device__ __forceinline__ float block_reduce_sum_f32_f16_kernel(half val) {
+    int warp = threadIdx.x / WARP_SIZE;
+    int lane = threadIdx.x % WARP_SIZE;
+    constexpr int NUM_WARPS = (NUM_THREADS + WARP_SIZE - 1) / WARP_SIZE;
+    static __shared__ float shared[NUM_WARPS];
+
+    float val_f32 = block_reduce_sum_f32_f16_kernel<NUM_THREADS>(val);
+    if (lane == 0) shared[warp] = val_f32;
+    __syncthreads();
+
+    val_f32 = (lane < NUM_WARPS) ? shared[lane] : 0.0f;
+    val_f32 = warp_reduce_sum_f32<NUM_WARPS>(val_f32);
+    return val_f32;
+}
