@@ -348,7 +348,7 @@ __global__ void rms_norm_f16x8_pack_f32_kernel(half *x, half *y, float g, int N,
     float variance = 0.0f;
 #pragma unroll
     for (int i = 0; i < 8; i++) {
-        float v = __half2float(pack_x[i])
+        float v = __half2float(pack_x[i]);
         variance += ((idx + i) < N * K) ? (v * v) : 0.0f;
     }
     variance = block_reduce_sum_f32<NUM_THREADS>(variance);
