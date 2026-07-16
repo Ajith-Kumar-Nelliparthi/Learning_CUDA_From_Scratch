@@ -140,3 +140,61 @@ __device__ __forceinline__ float block_reduce_sum_f32_f16_kernel(half val) {
     val_f32 = warp_reduce_sum_f32<NUM_WARPS>(val_f32);
     return val_f32;
 }
+
+template <const int NUM_THREADS = 256>
+__global__ void rms_norm_f16_f16_kernel(half *x, half *y, float g, int N, int K) {
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+    const half epsilon = 1e-5f;
+    const half k_ = __int2half_rn(K);
+    const half g_ = __float2half(g);
+    static __shared__ half s_var;
+
+    half value = ((idx < N * K) ? x[idx] : __float2half(0.0f));
+    half variance = value * value;
+    variance = block_reduce_sum_f16_f16_kernel<NUM_THREADS>(value);
+    if (tid == 0) s_var = hrsqrt(variance / k_ + epsilon);
+    __syncthreads();
+
+    if (idx < N * K) {
+        y[idx] = (value * s_var) * g_;
+    }
+}
+
+template <const int NUM_THREADS = 256>
+__global__ void rms_norm_f16x2_f16_kernel(half *x, half *y, float g, int N, int K) {
+    int tid = threadIdx.x;
+    int idx = 2 * (blockIdx.x * blockDim.x + tid);
+    const half epsilon = 1e-5f;
+    const half g_ = __float2half(g);
+    const half k_ = __int2half_rn(K);
+    static __shared__ half s_var;
+
+    half2 reg_x = HALF2(x[idx]);
+    half variance = (idx < N * K) ? (reg_x.x * reg_x.x + reg_x.y * reg_x.y) : __float2half(0.0f);
+    variance = block_reduce_sum_f16_f16_kernel<NUM_THREADS>(variance);
+    if (tid == 0) s_var = hrsqrt(variance / k_ + epsilon);
+    __syncthreads();
+
+    half2 reg_y;
+    reg_y.x = (reg_x.x * s_var) * g_;
+    reg_y.y = (reg_x.y * s_var) * g_;
+    if (idx < N * K) {
+        HALF2(y[idx]) = reg_y;
+    }
+}
+
+#define HALF2_VARIANCE(reg, i) \
+    (((idx + (i)) < N * K) ? ((reg).x * (reg).x + (reg).y * (reg).y * (reg).y) : __float2half(0.0f));
+
+#define FLOAT2_VARIANCE(reg, i) \
+    (((idx + (i)) < N * K) ? ((reg).x * (reg).x + (reg).y * (reg).y) : 0.0f);
+
+#define HALF2_RMS_NORM(reg_y, reg_x, g)                                        \
+  (reg_y).x = (reg_x).x * s_variance * (g);                                    \
+  (reg_y).y = (reg_x).y * s_variance * (g);
+
+#define FLOAT2_RMS_NORM(reg_y, reg_x, g)                                       \
+  (reg_y).x = (reg_x).x * s_variance * (g);                                    \
+  (reg_y).y = (reg_x).y * s_variance * (g);
+
