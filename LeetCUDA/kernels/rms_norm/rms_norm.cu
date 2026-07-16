@@ -198,3 +198,170 @@ __global__ void rms_norm_f16x2_f16_kernel(half *x, half *y, float g, int N, int 
   (reg_y).x = (reg_x).x * s_variance * (g);                                    \
   (reg_y).y = (reg_x).y * s_variance * (g);
 
+
+template <const int NUM_THREADS = 256>
+__global__ void rms_norm_f16x8_f16_kernel(half *x, half *y, float g, int N, int K) {
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+    int idx = (bid * blockDim.x + tid) * 8;
+    const half epsilon = 1e-5f;
+    const half g_ = __float2half(g);
+    const half k_ = __int2half_rn(K);
+    __shared__ half s_variance;
+
+    half2 reg_x_0 = HALF2(x[idx + 0]);
+    half2 reg_x_1 = HALF2(x[idx + 2]);
+    half2 reg_x_2 = HALF2(x[idx + 4]);
+    half2 reg_x_3 = HALF2(x[idx + 6]);
+    half variance = HALF2_VARIANCE(reg_x_0, 0);
+    variance += HALF2_VARIANCE(reg_x_1, 2);
+    variance += HALF2_VARIANCE(reg_x_2, 4);
+    variance += HALF2_VARIANCE(reg_x_3, 6);
+    
+    variance = block_reduce_sum_f16_f16_kernel<NUM_THREADS>(variance);
+    if (tid == 0) s_variance = hrsqrt(variance / k_ + epsilon);
+    __syncthreads();
+
+    half2 reg_y_0, reg_y_1, reg_y_2, reg_y_3;
+    HALF2_RMS_NORM(reg_y_0, reg_x_0, g_);
+    HALF2_RMS_NORM(reg_y_1, reg_x_1, g_);
+    HALF2_RMS_NORM(reg_y_2, reg_x_2, g_);
+    HALF2_RMS_NORM(reg_y_3, reg_x_3, g_);
+    if ((idx + 0) < N * K) {
+        HALF2(y[idx + 0]) = reg_y_0;
+    }
+    if ((idx + 2) < N * K) {
+        HALF2(y[idx + 2]) = reg_y_1;
+    }
+    if ((idx + 4) < N * K) {
+        HALF2(y[idx + 4]) = reg_y_2;
+    }
+    if ((idx + 6) < N * K) {
+        HALF2(y[idx + 6]) = reg_y_3;
+    }
+}
+
+template <const int NUM_THREADS = 256>
+__global__ void rms_norm_f16x8_f32_kernel(half *x, half *y, float g, int N, int K) {
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+    int idx = (bid * blockDim.x + tid) * 8;
+    const float epsilon = 1e-5f;
+    __shared__ float s_variance;
+
+    float2 reg_x_0 = __half22float2(HALF2(x[idx + 0]));
+    float2 reg_x_1 = __half22float2(HALF2(x[idx + 2]));
+    float2 reg_x_2 = __half22float2(HALF2(x[idx + 4]));
+    float2 reg_x_3 = __half22float2(HALF2(x[idx + 6]));
+    
+    float variance = FLOAT2_VARIANCE(reg_x_0, 0);
+    variance += FLOAT2_VARIANCE(reg_x_1, 2);
+    variance += FLOAT2_VARIANCE(reg_x_2, 4);
+    variance += FLOAT2_VARIANCE(reg_x_3, 6);
+    
+    variance = block_reduce_sum_f32<NUM_THREADS>(variance);
+    if (tid == 0) s_variance = rsqrtf(variance / (float)K + epsilon);
+    __syncthreads();
+
+    float2 reg_y_0, reg_y_1, reg_y_2, reg_y_3;
+    FLOAT2_RMS_NORM(reg_y_0, reg_x_0, g);
+    FLOAT2_RMS_NORM(reg_y_1, reg_x_1, g);
+    FLOAT2_RMS_NORM(reg_y_2, reg_x_2, g);
+    FLOAT2_RMS_NORM(reg_y_3, reg_x_3, g);
+
+    if ((idx + 0) < N * K) {
+        HALF2(y[idx + 0]) = __float22half2_rn(reg_y_0);
+    }
+    if ((idx + 2) < N * K) {
+        HALF2(y[idx + 2]) = __float22half2_rn(reg_y_1);
+    }
+    if ((idx + 4) < N * K) {
+        HALF2(y[idx + 4]) = __float22half2_rn(reg_y_2);
+    }
+    if ((idx + 6) < N * K) {
+        HALF2(y[idx + 7]) = __float22half2_rn(reg_y_3);
+    }
+}
+
+template <const int NUM_THREADS = 256>
+__global__ void rms_norm_f16_f32_kernel(half *x, half *y, float g, int N, int K) {
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+    const float epsilon = 1e-5f;
+    __shared__ float s_variance;
+
+    float value = (idx < N * K) ? __half2float(x[idx]) : 0.0f;
+    float variance = value * value;
+    variance = block_reduce_sum_f32<NUM_THREADS>(value);
+    if (tid == 0) s_variance = rsqrtf(variance / (float)K + epsilon);
+    __syncthreads();
+
+    if (idx < N * K) {
+        y[idx] = __float2half(value * s_variance) * g;
+    }
+}
+
+template <const int NUM_THREADS = 256>
+__global__ void rms_norm_f16x8_pack_f16_kernel(half *x, half *y, float g, int N, int K) {
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+    int idx = (bid * blockDim.x + tid) * 8;
+    const half epsilon = 1e-5f;
+    const half g_ = __float2half(g);
+    const half k_ = __int2half_rn(K);
+    const half z_ = __float2half(0.0f);
+    __shared__ half s_variance;
+
+    half pack_x[8], pack_y[8]; // load 8x16 bits = 128 bits once
+    LDST128BITS(pack_x[0]) = LDST128BITS(x[idx]);
+
+    half variance = z_;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        variance += ((idx + i) < N * K) ? (pack_x[i] * pack_x[i]) : z_;
+    }
+    variance = block_reduce_sum_f16_f16_kernel<NUM_THREADS>(variance);
+    if (tid == 0) s_variance = hrsqrt(variance / k_ + epsilon);
+    __syncthreads();
+
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        pack_y[i] = pack_x[i] * s_variance * g_;
+    }
+
+    if ((iddx + 7) < N * K) {
+        LDST128BITS(y[idx]) = LDST128BITS(pack_y[0]);
+    }
+}
+
+template <const int NUM_THREADS = 256>
+__global__ void rms_norm_f16x8_pack_f32_kernel(half *x, half *y, float g, int N, int K) {
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+    int idx = (bid * blockDim.x + tid) * 8;
+    const float epsilon = 1e-5f;
+    __shared__ float s_variance;
+
+    half pack_x[8], pack_y[8];
+    LDST128BITS(pack_x[0]) = LDST128BITS(x[idx]);
+
+    float variance = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        float v = __half2float(pack_x[i])
+        variance += ((idx + i) < N * K) ? (v * v) : 0.0f;
+    }
+    variance = block_reduce_sum_f32<NUM_THREADS>(variance);
+    if (tid == 0) s_variance = rsqrtf(v / (float)K + epsilon);
+    __syncthreads();
+
+#pragma unroll
+    for (int i = 0; i < 8; i += 2) {
+        float2 v2 = __half22float2(HALF2(pack_x[i]));
+        float2 y2 = {v2.x * s_variance * g, v2.y * s_variance * g};
+        HALF2(pack_y[i]) = __float22half2_rn(y2);
+    }
+    if ((idx + 7) < N * K) {
+        LDST128BITS(y[idx]) = LDST128BITS(pack_y[0]);
+    }
+}
