@@ -297,7 +297,7 @@ __global__ void rms_norm_f16_f32_kernel(half *x, half *y, float g, int N, int K)
     __syncthreads();
 
     if (idx < N * K) {
-        y[idx] = __float2half(value * s_variance) * g;
+        y[idx] = __float2half((value * s_variance) * g);
     }
 }
 
