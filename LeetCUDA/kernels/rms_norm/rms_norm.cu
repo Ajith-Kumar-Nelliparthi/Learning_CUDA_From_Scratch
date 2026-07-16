@@ -60,7 +60,7 @@ __global__ void rms_norm_f32_kernel(float *x, float *y, int g, int N, int K) {
     if (tid == 0) s_var = rsqrtf(variance / (float)K + epsilon);
     __syncthreads();
     if (idx < N * K) {
-        y[idx] = (val * s_var) + g;
+        y[idx] = (val * s_var) * g;
     }
 }
 
@@ -79,10 +79,10 @@ __global__ void rms_norm_f32x4_kernel(float *x, float *y, int g, int N, int K) {
     __syncthreads();
     
     float4 reg_y;
-    reg_y.x = reg_x.x * s_var + g;
-    reg_y.y = reg_x.y * s_var + g;
-    reg_y.z = reg_x.z * s_var + g;
-    reg_y.w = reg_x.w * s_var + g;
+    reg_y.x = reg_x.x * s_var * g;
+    reg_y.y = reg_x.y * s_var * g;
+    reg_y.z = reg_x.z * s_var * g;
+    reg_y.w = reg_x.w * s_var * g;
     if (idx < N * K) FLOAT4(y[idx]) = reg_y;
 }
 
@@ -132,7 +132,7 @@ __device__ __forceinline__ float block_reduce_sum_f32_f16_kernel(half val) {
     constexpr int NUM_WARPS = (NUM_THREADS + WARP_SIZE - 1) / WARP_SIZE;
     static __shared__ float shared[NUM_WARPS];
 
-    float val_f32 = block_reduce_sum_f32_f16_kernel<NUM_THREADS>(val);
+    float val_f32 = warp_reduce_sum_f32_f16<NUM_THREADS>(val);
     if (lane == 0) shared[warp] = val_f32;
     __syncthreads();
 
@@ -152,7 +152,7 @@ __global__ void rms_norm_f16_f16_kernel(half *x, half *y, float g, int N, int K)
 
     half value = ((idx < N * K) ? x[idx] : __float2half(0.0f));
     half variance = value * value;
-    variance = block_reduce_sum_f16_f16_kernel<NUM_THREADS>(value);
+    variance = block_reduce_sum_f16_f16_kernel<NUM_THREADS>(variance);
     if (tid == 0) s_var = hrsqrt(variance / k_ + epsilon);
     __syncthreads();
 
@@ -185,7 +185,7 @@ __global__ void rms_norm_f16x2_f16_kernel(half *x, half *y, float g, int N, int 
 }
 
 #define HALF2_VARIANCE(reg, i) \
-    (((idx + (i)) < N * K) ? ((reg).x * (reg).x + (reg).y * (reg).y * (reg).y) : __float2half(0.0f));
+    (((idx + (i)) < N * K) ? ((reg).x * (reg).x + (reg).y * (reg).y) : __float2half(0.0f));
 
 #define FLOAT2_VARIANCE(reg, i) \
     (((idx + (i)) < N * K) ? ((reg).x * (reg).x + (reg).y * (reg).y) : 0.0f);
@@ -279,7 +279,7 @@ __global__ void rms_norm_f16x8_f32_kernel(half *x, half *y, float g, int N, int 
         HALF2(y[idx + 4]) = __float22half2_rn(reg_y_2);
     }
     if ((idx + 6) < N * K) {
-        HALF2(y[idx + 7]) = __float22half2_rn(reg_y_3);
+        HALF2(y[idx + 6]) = __float22half2_rn(reg_y_3);
     }
 }
 
@@ -292,7 +292,7 @@ __global__ void rms_norm_f16_f32_kernel(half *x, half *y, float g, int N, int K)
 
     float value = (idx < N * K) ? __half2float(x[idx]) : 0.0f;
     float variance = value * value;
-    variance = block_reduce_sum_f32<NUM_THREADS>(value);
+    variance = block_reduce_sum_f32<NUM_THREADS>(variance);
     if (tid == 0) s_variance = rsqrtf(variance / (float)K + epsilon);
     __syncthreads();
 
