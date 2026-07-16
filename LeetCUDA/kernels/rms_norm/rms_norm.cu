@@ -329,7 +329,7 @@ __global__ void rms_norm_f16x8_pack_f16_kernel(half *x, half *y, float g, int N,
         pack_y[i] = pack_x[i] * s_variance * g_;
     }
 
-    if ((iddx + 7) < N * K) {
+    if ((idx + 7) < N * K) {
         LDST128BITS(y[idx]) = LDST128BITS(pack_y[0]);
     }
 }
@@ -352,7 +352,7 @@ __global__ void rms_norm_f16x8_pack_f32_kernel(half *x, half *y, float g, int N,
         variance += ((idx + i) < N * K) ? (v * v) : 0.0f;
     }
     variance = block_reduce_sum_f32<NUM_THREADS>(variance);
-    if (tid == 0) s_variance = rsqrtf(v / (float)K + epsilon);
+    if (tid == 0) s_variance = rsqrtf(variance / (float)K + epsilon);
     __syncthreads();
 
 #pragma unroll
