@@ -1,8 +1,5 @@
-<div align="center">
-  <img src="assets/banner.svg" alt="CUDA Kernels from Scratch" width="100%">
-</div>
-
-<h1 align="center">CUDA Kernels from Scratch</h1>
+# CUDA Kernels from Easy to Hard
+![cuda](assets/banner.svg)
 
 <p align="center">
   Hand-written CUDA kernels, ordered easy → hard. Each one implemented and validated against a reference implementation.
