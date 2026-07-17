@@ -1,5 +1,5 @@
 # [LeetCUDA](https://github.com/xlite-dev/LeetCUDA.git) 
-![LeetCUDA Banner](assets/kernel_banner.svg)
+![LeetCUDA Banner](../assets/kernel_banner.svg)
 Solving problems of Leetcuda and benchmarking them against Pytorch.
 
 <p align="center">
