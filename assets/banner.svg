@@ -1,0 +1,98 @@
+<svg viewBox="0 0 1200 280" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#16161f"/>
+      <stop offset="100%" stop-color="#1c1b2e"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+    <radialGradient id="glowSpot" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#8b5cf6" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowSpot2" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="280" fill="url(#bg)"/>
+
+  <!-- soft ambient glows -->
+  <circle cx="1000" cy="60" r="260" fill="url(#glowSpot)"/>
+  <circle cx="150" cy="240" r="220" fill="url(#glowSpot2)"/>
+
+  <!-- minimal dot grid, right side -->
+  <g fill="#ffffff" opacity="0.18">
+    <circle cx="860" cy="70" r="2"/>
+    <circle cx="900" cy="70" r="2"/>
+    <circle cx="940" cy="70" r="2"/>
+    <circle cx="980" cy="70" r="2"/>
+    <circle cx="1020" cy="70" r="2"/>
+    <circle cx="1060" cy="70" r="2"/>
+    <circle cx="1100" cy="70" r="2"/>
+
+    <circle cx="860" cy="110" r="2"/>
+    <circle cx="900" cy="110" r="2"/>
+    <circle cx="940" cy="110" r="2"/>
+    <circle cx="980" cy="110" r="2"/>
+    <circle cx="1020" cy="110" r="2"/>
+    <circle cx="1060" cy="110" r="2"/>
+    <circle cx="1100" cy="110" r="2"/>
+
+    <circle cx="860" cy="150" r="2"/>
+    <circle cx="900" cy="150" r="2"/>
+    <circle cx="940" cy="150" r="2"/>
+    <circle cx="980" cy="150" r="2"/>
+    <circle cx="1020" cy="150" r="2"/>
+    <circle cx="1060" cy="150" r="2"/>
+    <circle cx="1100" cy="150" r="2"/>
+
+    <circle cx="860" cy="190" r="2"/>
+    <circle cx="900" cy="190" r="2"/>
+    <circle cx="940" cy="190" r="2"/>
+    <circle cx="980" cy="190" r="2"/>
+    <circle cx="1020" cy="190" r="2"/>
+    <circle cx="1060" cy="190" r="2"/>
+    <circle cx="1100" cy="190" r="2"/>
+  </g>
+
+  <!-- a few brighter connected dots to suggest a "kernel grid" -->
+  <g stroke="url(#accent)" stroke-width="1.4" opacity="0.85">
+    <line x1="900" y1="70" x2="980" y2="110"/>
+    <line x1="980" y1="110" x2="940" y2="150"/>
+    <line x1="940" y1="150" x2="1060" y2="190"/>
+    <line x1="1060" y1="190" x2="1020" y2="110"/>
+  </g>
+  <g fill="url(#accent)">
+    <circle cx="900" cy="70" r="4.5"/>
+    <circle cx="980" cy="110" r="4.5"/>
+    <circle cx="940" cy="150" r="4.5"/>
+    <circle cx="1060" cy="190" r="4.5"/>
+    <circle cx="1020" cy="110" r="4.5"/>
+  </g>
+
+  <!-- accent rule -->
+  <rect x="70" y="70" width="56" height="5" rx="2.5" fill="url(#accent)"/>
+
+  <!-- Title -->
+  <text x="70" y="130" font-family="Arial, Helvetica, sans-serif" font-size="46" font-weight="700" fill="#f5f5f7">
+    CUDA Kernels
+  </text>
+  <text x="70" y="170" font-family="Arial, Helvetica, sans-serif" font-size="46" font-weight="700" fill="transparent" stroke="url(#accent)" stroke-width="1">
+    from Scratch
+  </text>
+  <text x="70" y="170" font-family="Arial, Helvetica, sans-serif" font-size="46" font-weight="700" fill="url(#accent)">
+    from Scratch
+  </text>
+
+  <!-- Subtitle -->
+  <text x="70" y="205" font-family="Arial, Helvetica, sans-serif" font-size="17" fill="#a1a1b5">
+    Written, tested, and benchmarked — one kernel at a time, easy to hard.
+  </text>
+
+  <!-- bottom thin accent line -->
+  <rect x="0" y="276" width="1200" height="4" fill="url(#accent)"/>
+</svg>
