@@ -13,6 +13,7 @@ lib = load(
     sources=["sgemv.cu"],
     extra_cuda_cflags=[
         "-O3",
+        "-Xptxas", "-v",
         "-U__CUDA_NO_HALF_OPERATORS__",
         "-U__CUDA_NO_HALF_CONVERSIONS__",
         "-U__CUDA_NO_HALF2_OPERATORS__",
@@ -22,6 +23,7 @@ lib = load(
         "--use_fast_math",
     ],
     extra_cflags=["-std=c++17"],
+    verbose=True,
 )
 
 
