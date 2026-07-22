@@ -29,13 +29,13 @@ __global__ void sgemv_k32_f32_kernel(float *x, float *a, float *y, int M, int K)
     int ty = threadIdx.y;       // 0 - 4
     int bid = blockIdx.x;        // 0 - M/4
     int m = bid * blockDim.y + threadIdx.y;    // (0-M/4) * 4 + (0-3)
-    int lane = tx % WARP_SIZE;
+    int lane = tx % WARP_SIZE;   // 0-31
     if (m < M) {
         float sum = 0.0f;
         int NUM_WARPS = (K + WARP_SIZE - 1) / WARP_SIZE;
 #pragma unroll
         for (int w=0; w<NUM_WARPS; w++) { 
-            int k = w * WARP_SIZE + K;              // 0-32, 32-64, 64-96, 96-128
+            int k = w * WARP_SIZE + lane;              // 0-32, 32-64, 64-96, 96-128
             sum += a[m * K + k] * x[k];             // m=rows(0-4) K=32, k=(32,64,96,128) 
         }
         sum = warp_reduce_sum<WARP_SIZE>(sum);
@@ -43,4 +43,25 @@ __global__ void sgemv_k32_f32_kernel(float *x, float *a, float *y, int M, int K)
             y[m] = sum;
         }
     }
+}
+
+__global__ void sgemv_k128_f32x4_kernel(float *x, float *a, float *y, int M,int K) {
+    int tx = threadIdx.x; // 0-31
+    int ty = threadIdx.y ;// 0-4
+    int bx = blockIdx.x;  // 0-M/4
+    int lane = tx % WARP_SIZE; // 0-31
+    int m = bx * blockDim.y + threadIdx.y; // (0-M/4) * 4 (No of rows in y) + (0-3)
+    if (m < M) {
+        float sum = 0.0f;
+        int NUM_WARPS = (((K + WARP_SIZE - 1) / WARP_SIZE) + 4 - 1) / 4;
+#pragma unroll
+        for (int w=0; w<NUM_WARPS; w++) {
+            int k = (w * WARP_SIZE + lane) * 4;
+            float4 reg_x = FLOAT4(x[k]);
+            float4 reg_a = FLOAT4(a[m * K + k]);
+            sum += (reg_a.x * reg_x.x + reg_a.y * reg_x.y + reg_a.w * reg_x.w + reg_a.z * reg_x.z);
+        }
+        sum = warp_reduce_sum<WARP_SIZE>(sum);
+        if (lane == 0) y[m] = sum;
+    } 
 }
