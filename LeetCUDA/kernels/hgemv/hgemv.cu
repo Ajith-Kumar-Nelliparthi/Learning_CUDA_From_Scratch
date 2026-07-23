@@ -52,7 +52,7 @@ __global__ void hgemv_k128_f16x4_kernel(half *a, half *x, half *y, int M, int K)
     int lane = tx % WARP_SIZE;
     if (m < M) {
         half sum = 0.0f;
-        int NUM_WARPS =  (((K + WARP_SIZE - 1) / WARP_SIZE) * 4 - 1) / 4;
+        int NUM_WARPS = (((K + WARP_SIZE - 1) / WARP_SIZE) + 4 - 1) / 4;
 #pragma unroll
         for (int w=0; w<NUM_WARPS; ++w) {
             int k = (w * WARP_SIZE + lane) * 4;
