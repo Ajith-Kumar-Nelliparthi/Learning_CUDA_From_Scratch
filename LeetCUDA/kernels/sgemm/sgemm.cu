@@ -214,3 +214,122 @@ __global__ void sgemm_t_8x8_sliced_k_f32x4_bcf_kernel(float *a, float *b, float 
     FLOAT4(c[store_c_gmem_addr + BN / 2]) = FLOAT4(r_c[i + TM / 2][4]);
   }
 }
+
+
+template <const int BM = 128, const int BN = 128, const int BK = 8,
+    const int TM = 8, const int TN = 8, const int OFFSET = 0>
+__global__ void sgemm_t_8x8_sliced_k_f32x4_bcf_dbuf_kernel(float *a, float *b, float *c, int M, int N, int K) {
+    // indexing
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
+    int tid = ty * bx + tx;     // thread within the block
+
+    // shared memory declaration
+    __shared__ float s_a[2][BK][BM + OFFSET], s_b[2][BK][BN + OFFSET];
+
+    // registers declaration
+    float r_load_a[TM / 2];
+    float r_load_b[TN / 2];
+    float r_comp_a[TM];
+    float r_comp_b[TN];
+    float r_c[TM][TN] = {0.0f};
+
+    // thread mapping to shared mem
+    int load_smem_a_m = tid / 2;  // 0,1,,,127
+    int load_smem_a_k = (tid & 1) << 2;    // check if tid is even or odd with last value in bits, then multiply by 4 to get 0 or 4
+    int load_smem_b_k = tid / 32; // 0-7
+    int load_smem_b_n = (tid & 31) << 2;   // check if tid is even or odd, then multiply by 4 to get 0 or 4 (0,4,,,124)
+
+    int load_gmem_a_m = by * BM + load_smem_a_m;
+    int load_gmem_b_n = bx * BN + load_smem_b_n;    // 1D flat index for GM
+
+    // bk = 0 loading here, buffer 0
+    {
+        int load_gmem_a_k = load_smem_a_k;
+        int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+        int load_gmem_b_k = load_smem_b_k;
+        int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+        // load from global memory to registers
+        FLOAT4(r_load_a[0]) = FLOAT4(a[load_gmem_a_addr]);
+        FLOAT4(r_load_b[0]) = FLOAT4(b[load_gmem_b_addr]);
+
+        // write to shared memory buffer 0
+        s_a[0][load_smem_a_k][load_smem_a_m] = r_load_a[0];
+        s_a[0][load_smem_a_k + 1][load_smem_a_m] = r_load_a[1];
+        s_a[0][load_smem_a_k + 2][load_smem_a_m] = r_load_a[2];
+        s_a[0][load_smem_a_k + 3][load_smem_a_m] = r_load_a[3];
+        FLOAT4(s_b[0][load_smem_b_k][load_smem_b_n])  = FLOAT4(r_load_b[0]);
+    }
+    __syncthreads();
+
+    for (int bk=1; bk < (K + BK - 1) / BK; ++bk) {
+        int smem_sel = (bk - 1) & 1; // buffer index for current iteration
+        int smem_sel_next = bk & 1; // buffer index for next iteration
+
+        int load_gmem_a_k = bk * BK + load_smem_a_k;
+        int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+        int load_gmem_b_k = bk * BK + load_smem_b_k;
+        int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+        FLOAT4(r_load_a[0]) = FLOAT4(a[load_gmem_a_addr]);
+        FLOAT4(r_load_b[0]) = FLOAT4(b[load_gmem_b_addr]);
+
+#pragma unroll
+        for (int tk=0; tk<BK; ++tk) {
+            // load from shared memory buffer
+            FLOAT4(r_comp_a[0]) = FLOAT4(s_a[smem_sel][tk][ty * TM / 2]);
+            FLOAT4(r_comp_a[4]) = FLOAT4(s_a[smem_sel][tk][ty * TM / 2 + BM / 2]);
+            FLOAT4(r_comp_b[0]) = FLOAT4(s_b[smem_sel][tk][tx * TN / 2]);
+            FLOAT4(r_comp_b[4]) = FLOAT4(s_b[smem_sel][tk][tx * TN / 2 + BN / 2]);
+
+#pragma unroll
+            for (int tm=0; tm<TM; ++tm){
+            #pragma unroll
+                for (int tn=0; tn<TN; ++tn) {
+                    r_c[tm][tn] = __fmaf_rn(r_comp_a[tm], r_comp_b[tn], r_c[tm][tn]);
+                }
+            }
+        }
+        // write to shared memory buffer for next iteration
+        s_a[smem_sel_next][load_smem_a_k][load_smem_a_m] = r_load_a[0];
+        s_a[smem_sel_next][load_smem_a_k + 1][load_smem_a_m] = r_load_a[1];
+        s_a[smem_sel_next][load_smem_a_k + 2][load_smem_a_m] = r_load_a[2];
+        s_a[smem_sel_next][load_smem_a_k + 3][load_smem_a_m] = r_load_a[3];
+        FLOAT4(s_b[smem_sel_next][load_smem_b_k][load_smem_b_n]) = FLOAT4(r_load_b[0]);
+        __syncthreads();
+
+    #pragma unroll
+        for (int tk=0; tk<BK; tk++) {
+            FLOAT4(r_comp_a[0]) = FLOAT4(s_a[smem_sel_next][tk][ty * TM / 2]);
+            FLOAT4(r_comp_a[4]) = FLOAT4(s_a[smem_sel_next][tk][ty * TM / 2 + BM / 2]);
+            FLOAT4(r_comp_b[0]) = FLOAT4(s_b[smem_sel_next][tk][tx * TN / 2]);
+            FLOAT4(r_comp_b[4]) = FLOAT4(s_b[smem_sel_next][tk][tx * TN / 2 + BN / 2]);
+
+        #pragma unroll
+            for (int tm=0; tm<TM; tm++) {
+            #pragma unroll
+                for (int tn=0; tn<TN; tn++) {
+                    r_c[tm][tn] = __fmaf_rn(r_comp_a[tm], r_comp_b[tn], r_c[tm][tn]);
+                }
+            }
+        }
+
+    }
+#pragma unroll
+  for (int i = 0; i < TM / 2; i++) {
+    int store_c_gmem_m = by * BM + ty * TM / 2 + i;
+    int store_c_gmem_n = bx * BN + tx * TN / 2;
+    int store_c_gmem_addr = store_c_gmem_m * N + store_c_gmem_n;
+    FLOAT4(c[store_c_gmem_addr]) = FLOAT4(r_c[i][0]);
+    FLOAT4(c[store_c_gmem_addr + BN / 2]) = FLOAT4(r_c[i][4]);
+  }
+#pragma unroll
+  for (int i = 0; i < TM / 2; i++) {
+    int store_c_gmem_m = by * BM + BM / 2 + ty * TM / 2 + i;
+    int store_c_gmem_n = bx * BN + tx * TN / 2;
+    int store_c_gmem_addr = store_c_gmem_m * N + store_c_gmem_n;
+    FLOAT4(c[store_c_gmem_addr]) = FLOAT4(r_c[i + TM / 2][0]);
+    FLOAT4(c[store_c_gmem_addr + BN / 2]) = FLOAT4(r_c[i + TM / 2][4]);
+  }
+}
