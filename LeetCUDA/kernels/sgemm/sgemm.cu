@@ -28,7 +28,7 @@ __global__ void sgemm_naive_f32(float *a, float *b, float *c, int M, int N, int 
 
 // define slices of BM,BN,BK
 template <const int BM=32, const int BN=32, const int BK=32>
-__global__ void sgemm_slice_k_f32_kernel(float *a, float *b, float *c, int M, int N, int K) {
+__global__ void sgemm_sliced_k_f32_kernel(float *a, float *b, float *c, int M, int N, int K) {
     __shared__ float s_a[BM][BK], s_b[BK][BN];
 
     // define thread & block indices
@@ -332,4 +332,212 @@ __global__ void sgemm_t_8x8_sliced_k_f32x4_bcf_dbuf_kernel(float *a, float *b, f
     FLOAT4(c[store_c_gmem_addr]) = FLOAT4(r_c[i + TM / 2][0]);
     FLOAT4(c[store_c_gmem_addr + BN / 2]) = FLOAT4(r_c[i + TM / 2][4]);
   }
+}
+
+#define STRINGFY(str) #str
+#define TORCH_BINDING_COMMON_EXTENSION(func)                                   \
+  m.def(STRINGFY(func), &func, STRINGFY(func));
+
+#define CHECK_TORCH_TENSOR_DTYPE(T, th_type)                                   \
+  if (((T).options().dtype() != (th_type))) {                                  \
+    std::cout << "Tensor Info:" << (T).options() << std::endl;                 \
+    throw std::runtime_error("values must be " #th_type);                      \
+  }
+
+#define CHECK_TORCH_TENSOR_SHAPE(T, S0, S1)                                    \
+  if (((T).size(0) != (S0)) || ((T).size(1) != (S1))) {                        \
+    throw std::runtime_error("Tensor size mismatch!");                         \
+  }
+
+// SGEMM NAIVE
+void sgemm_naive_f32(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
+    CHECK_TORCH_TENSOR_DTYPE(a, torch::kFloat32);
+    CHECK_TORCH_TENSOR_DTYPE(b, torch::kFloat32);
+    CHECK_TORCH_TENSOR_DTYPE(c, torch::kFloat32);
+    const int M = a.size(0);
+    const int K = a.size(1);
+    const int N = b.size(1);
+    CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+    CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+    CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+    constexpr int BM = 32;
+    constexpr int BN = 32;
+
+    dim3 block(BM, BN);
+    dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+    sgemm_slice_k_f32_kernel<<<grid, block>>>(
+        reinterpret_cast<float *>(a.data_ptr()),
+        reinterpret_cast<float *>(b.data_ptr()),
+        reinterpret_cast<float *>(c.data_ptr()),
+        M, N, K
+    );
+}
+
+void sgemm_sliced_k_f32(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kFloat32)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kFloat32)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kFloat32)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int BM = 32;
+  constexpr int BN = 32;
+  constexpr int BK = 32;
+
+  dim3 block(BN, BM);
+  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+  sgemm_sliced_k_f32_kernel<BM, BN, BK>
+      <<<grid, block>>>(reinterpret_cast<float *>(a.data_ptr()),
+                        reinterpret_cast<float *>(b.data_ptr()),
+                        reinterpret_cast<float *>(c.data_ptr()), M, N, K);
+}
+
+void sgemm_t_8x8_sliced_k_f32x4(torch::Tensor a, torch::Tensor b,
+                                torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kFloat32)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kFloat32)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kFloat32)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int BM = 128;
+  constexpr int BN = 128;
+  constexpr int BK = 8;
+  constexpr int TM = 8;
+  constexpr int TN = 8;
+
+  dim3 block(BN / TN, BM / TM);
+  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+  sgemm_t_8x8_sliced_k_f32x4_kernel<BM, BN, BK, TM, TN>
+      <<<grid, block>>>(reinterpret_cast<float *>(a.data_ptr()),
+                        reinterpret_cast<float *>(b.data_ptr()),
+                        reinterpret_cast<float *>(c.data_ptr()), M, N, K);
+}
+
+void sgemm_t_8x8_sliced_k_f32x4_bcf(torch::Tensor a, torch::Tensor b,
+                                    torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kFloat32)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kFloat32)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kFloat32)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int BM = 128;
+  constexpr int BN = 128;
+  constexpr int BK = 8;
+  constexpr int TM = 8;
+  constexpr int TN = 8;
+
+  dim3 block(BN / TN, BM / TM);
+  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+  sgemm_t_8x8_sliced_k_f32x4_bcf_kernel<BM, BN, BK, TM, TN>
+      <<<grid, block>>>(reinterpret_cast<float *>(a.data_ptr()),
+                        reinterpret_cast<float *>(b.data_ptr()),
+                        reinterpret_cast<float *>(c.data_ptr()), M, N, K);
+}
+
+void sgemm_t_8x8_sliced_k_f32x4_bcf_offset(torch::Tensor a, torch::Tensor b,
+                                           torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kFloat32)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kFloat32)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kFloat32)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int BM = 128;
+  constexpr int BN = 128;
+  constexpr int BK = 8;
+  constexpr int TM = 8;
+  constexpr int TN = 8;
+  constexpr int OFFSET = 4;
+
+  dim3 block(BN / TN, BM / TM);
+  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+  sgemm_t_8x8_sliced_k_f32x4_bcf_kernel<BM, BN, BK, TM, TN, OFFSET>
+      <<<grid, block>>>(reinterpret_cast<float *>(a.data_ptr()),
+                        reinterpret_cast<float *>(b.data_ptr()),
+                        reinterpret_cast<float *>(c.data_ptr()), M, N, K);
+}
+
+void sgemm_t_8x8_sliced_k_f32x4_bcf_dbuf(torch::Tensor a, torch::Tensor b,
+                                         torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kFloat32)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kFloat32)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kFloat32)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int BM = 128;
+  constexpr int BN = 128;
+  constexpr int BK = 8;
+  constexpr int TM = 8;
+  constexpr int TN = 8;
+
+  dim3 block(BN / TN, BM / TM);
+  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+  sgemm_t_8x8_sliced_k_f32x4_bcf_dbuf_kernel<BM, BN, BK, TM, TN>
+      <<<grid, block>>>(reinterpret_cast<float *>(a.data_ptr()),
+                        reinterpret_cast<float *>(b.data_ptr()),
+                        reinterpret_cast<float *>(c.data_ptr()), M, N, K);
+}
+
+void sgemm_t_8x8_sliced_k_f32x4_bcf_dbuf_offset(torch::Tensor a,
+                                                torch::Tensor b,
+                                                torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kFloat32)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kFloat32)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kFloat32)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int BM = 128;
+  constexpr int BN = 128;
+  constexpr int BK = 8;
+  constexpr int TM = 8;
+  constexpr int TN = 8;
+  constexpr int OFFSET = 4;
+
+  dim3 block(BN / TN, BM / TM);
+  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+  sgemm_t_8x8_sliced_k_f32x4_bcf_dbuf_kernel<BM, BN, BK, TM, TN, OFFSET>
+      <<<grid, block>>>(reinterpret_cast<float *>(a.data_ptr()),
+                        reinterpret_cast<float *>(b.data_ptr()),
+                        reinterpret_cast<float *>(c.data_ptr()), M, N, K);
+}
+
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  // CUDA Cores
+  TORCH_BINDING_COMMON_EXTENSION(sgemm_naive_f32)
+  TORCH_BINDING_COMMON_EXTENSION(sgemm_sliced_k_f32)
+  TORCH_BINDING_COMMON_EXTENSION(sgemm_t_8x8_sliced_k_f32x4)
+  TORCH_BINDING_COMMON_EXTENSION(sgemm_t_8x8_sliced_k_f32x4_bcf)
+  TORCH_BINDING_COMMON_EXTENSION(sgemm_t_8x8_sliced_k_f32x4_bcf_offset)
+  TORCH_BINDING_COMMON_EXTENSION(sgemm_t_8x8_sliced_k_f32x4_bcf_dbuf)
+  TORCH_BINDING_COMMON_EXTENSION(sgemm_t_8x8_sliced_k_f32x4_bcf_dbuf_offset)
 }
