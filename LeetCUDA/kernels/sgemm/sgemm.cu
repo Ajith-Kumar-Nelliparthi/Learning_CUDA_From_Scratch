@@ -8,11 +8,11 @@
 #include <torch/extension.h>
 #include <torch/types.h>
 
-#define FLOAT4(valu) (reinterpret_cast<float4 *>(&(value))[0])
-#define INT4(valu) (reinterpret_cast<int4 *>(&(value))[0])
+#define FLOAT4(value) (reinterpret_cast<float4 *>(&(value))[0])
+#define INT4(value) (reinterpret_cast<int4 *>(&(value))[0])
 #define WARP_SIZE 32
 
-__global__ void sgemm_naive_f32(float *a, float *b, float *c, int M, int N, int K) {
+__global__ void sgemm_naive_f32_kernel(float *a, float *b, float *c, int M, int N, int K) {
     int m = blockIdx.y * blockDim.y + threadIdx.y;
     int n = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -37,7 +37,7 @@ __global__ void sgemm_sliced_k_f32_kernel(float *a, float *b, float *c, int M, i
     const int bx = blockIdx.x;
     const int by = blockIdx.y;
     // tid within the block upto 1024 (31 * 32 + 31 = 1023)
-    int tid = ty * blockDim.y + tx; 
+    int tid = ty * blockDim.x + tx; 
     // shared memory indices (to write values)
     int load_smem_a_m = tid / 32;
     int load_smem_a_k = tid % 32;
@@ -94,7 +94,7 @@ __global__ void sgemm_t_8x8_sliced_k_f32x4_kernel(float *a, float *b, float *c, 
     int load_gmem_a_m = by * BM + load_smem_a_m;    // global row of a and c
     int load_gmem_b_n = bx * BN + load_smem_b_n;    // global col of b and c
 
-    float r_c[TM][TN] - {0.0};
+    float r_c[TM][TN] = {0.0};
 // #pragma unroll
     for (int bk = 0; bk < (K + BK - 1) / BK; ++bk) {
         int load_gmem_a_k = bk * BK + load_smem_a_k;
@@ -125,9 +125,11 @@ __global__ void sgemm_t_8x8_sliced_k_f32x4_kernel(float *a, float *b, float *c, 
         int store_gmem_c_m = by * BM + ty * TM + m;
 #pragma unroll
         for (int n=0; n<TN; ++n) {
-            int store_gmem_c_n = bx * BN + tx * TN + n;
-            int store_gmem_c_addr = store_gmem_c_m * N + store_gmem_c_n;    // global memory address
-            FLOAT4(c[store_gmem_c_addr]) = FLOAT4(r_c[m][n]);
+            int store_gmem_c_m = by * BM + ty * TM + m;
+            int store_gmem_c_n = bx * BN + tx * TN;
+            int store_gmem_c_addr = store_gmem_c_m * N + store_gmem_c_n;
+            FLOAT4(c[store_gmem_c_addr])     = FLOAT4(r_c[m][0]);
+            FLOAT4(c[store_gmem_c_addr + 4]) = FLOAT4(r_c[m][4]);
         }
     }
 }
@@ -139,7 +141,7 @@ __global__ void sgemm_t_8x8_sliced_k_f32x4_bcf_kernel(float *a, float *b, float 
     const int ty = threadIdx.y;
     const int bx = blockIdx.x;
     const int by = blockIdx.y;
-    int tid = ty * bx + tx;     // thread within the block
+    int tid = ty * blockDim.x + tx;     // thread within the block
 
     // shared memory declaration
     __shared__ float s_a[BK][BM + OFFSET], s_b[BK][BN + OFFSET];
@@ -224,7 +226,7 @@ __global__ void sgemm_t_8x8_sliced_k_f32x4_bcf_dbuf_kernel(float *a, float *b, f
     const int ty = threadIdx.y;
     const int bx = blockIdx.x;
     const int by = blockIdx.y;
-    int tid = ty * bx + tx;     // thread within the block
+    int tid = ty * blockDim.x + tx;     // thread within the block
 
     // shared memory declaration
     __shared__ float s_a[2][BK][BM + OFFSET], s_b[2][BK][BN + OFFSET];
@@ -264,9 +266,9 @@ __global__ void sgemm_t_8x8_sliced_k_f32x4_bcf_dbuf_kernel(float *a, float *b, f
     }
     __syncthreads();
 
-    for (int bk=1; bk < (K + BK - 1) / BK; ++bk) {
-        int smem_sel = (bk - 1) & 1; // buffer index for current iteration
-        int smem_sel_next = bk & 1; // buffer index for next iteration
+    for (int bk = 1; bk < (K + BK - 1) / BK; ++bk) {
+        int smem_sel = (bk - 1) & 1;      // buffer holding the tile we're about to compute with
+        int smem_sel_next = bk & 1;       // buffer we'll write the newly prefetched tile into
 
         int load_gmem_a_k = bk * BK + load_smem_a_k;
         int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
@@ -275,46 +277,51 @@ __global__ void sgemm_t_8x8_sliced_k_f32x4_bcf_dbuf_kernel(float *a, float *b, f
         FLOAT4(r_load_a[0]) = FLOAT4(a[load_gmem_a_addr]);
         FLOAT4(r_load_b[0]) = FLOAT4(b[load_gmem_b_addr]);
 
-#pragma unroll
-        for (int tk=0; tk<BK; ++tk) {
-            // load from shared memory buffer
+        // single compute pass: consume the tile already sitting in smem_sel
+    #pragma unroll
+        for (int tk = 0; tk < BK; ++tk) {
             FLOAT4(r_comp_a[0]) = FLOAT4(s_a[smem_sel][tk][ty * TM / 2]);
             FLOAT4(r_comp_a[4]) = FLOAT4(s_a[smem_sel][tk][ty * TM / 2 + BM / 2]);
             FLOAT4(r_comp_b[0]) = FLOAT4(s_b[smem_sel][tk][tx * TN / 2]);
             FLOAT4(r_comp_b[4]) = FLOAT4(s_b[smem_sel][tk][tx * TN / 2 + BN / 2]);
 
-#pragma unroll
-            for (int tm=0; tm<TM; ++tm){
-            #pragma unroll
-                for (int tn=0; tn<TN; ++tn) {
+    #pragma unroll
+            for (int tm = 0; tm < TM; ++tm) {
+    #pragma unroll
+                for (int tn = 0; tn < TN; ++tn) {
                     r_c[tm][tn] = __fmaf_rn(r_comp_a[tm], r_comp_b[tn], r_c[tm][tn]);
                 }
             }
         }
-        // write to shared memory buffer for next iteration
+
+        // now write the prefetched tile into the other buffer, for next iteration
         s_a[smem_sel_next][load_smem_a_k][load_smem_a_m] = r_load_a[0];
         s_a[smem_sel_next][load_smem_a_k + 1][load_smem_a_m] = r_load_a[1];
         s_a[smem_sel_next][load_smem_a_k + 2][load_smem_a_m] = r_load_a[2];
         s_a[smem_sel_next][load_smem_a_k + 3][load_smem_a_m] = r_load_a[3];
         FLOAT4(s_b[smem_sel_next][load_smem_b_k][load_smem_b_n]) = FLOAT4(r_load_b[0]);
         __syncthreads();
+    }
+
+    // consume the final tile, which was prefetched in the loop's last iteration
+    // but never consumed inside the loop
+    {
+        int smem_sel_last = ((K + BK - 1) / BK - 1) & 1;
+    #pragma unroll
+        for (int tk = 0; tk < BK; ++tk) {
+            FLOAT4(r_comp_a[0]) = FLOAT4(s_a[smem_sel_last][tk][ty * TM / 2]);
+            FLOAT4(r_comp_a[4]) = FLOAT4(s_a[smem_sel_last][tk][ty * TM / 2 + BM / 2]);
+            FLOAT4(r_comp_b[0]) = FLOAT4(s_b[smem_sel_last][tk][tx * TN / 2]);
+            FLOAT4(r_comp_b[4]) = FLOAT4(s_b[smem_sel_last][tk][tx * TN / 2 + BN / 2]);
 
     #pragma unroll
-        for (int tk=0; tk<BK; tk++) {
-            FLOAT4(r_comp_a[0]) = FLOAT4(s_a[smem_sel_next][tk][ty * TM / 2]);
-            FLOAT4(r_comp_a[4]) = FLOAT4(s_a[smem_sel_next][tk][ty * TM / 2 + BM / 2]);
-            FLOAT4(r_comp_b[0]) = FLOAT4(s_b[smem_sel_next][tk][tx * TN / 2]);
-            FLOAT4(r_comp_b[4]) = FLOAT4(s_b[smem_sel_next][tk][tx * TN / 2 + BN / 2]);
-
-        #pragma unroll
-            for (int tm=0; tm<TM; tm++) {
-            #pragma unroll
-                for (int tn=0; tn<TN; tn++) {
+            for (int tm = 0; tm < TM; ++tm) {
+    #pragma unroll
+                for (int tn = 0; tn < TN; ++tn) {
                     r_c[tm][tn] = __fmaf_rn(r_comp_a[tm], r_comp_b[tn], r_c[tm][tn]);
                 }
             }
         }
-
     }
 #pragma unroll
   for (int i = 0; i < TM / 2; i++) {
@@ -366,7 +373,7 @@ void sgemm_naive_f32(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
     dim3 block(BM, BN);
     dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
 
-    sgemm_slice_k_f32_kernel<<<grid, block>>>(
+    sgemm_naive_f32_kernel<<<grid, block>>>(
         reinterpret_cast<float *>(a.data_ptr()),
         reinterpret_cast<float *>(b.data_ptr()),
         reinterpret_cast<float *>(c.data_ptr()),
