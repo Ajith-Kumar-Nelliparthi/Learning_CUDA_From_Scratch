@@ -196,3 +196,95 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_pack_kernel(half *a, half *b, half *c
         }
     }
 }
+
+template <const int BM=128, const int BN=128, const int BK=8,
+            const int TM=8, const int TN=8>
+__global__ void hgemm_t_8x8_sliced_k_f16x4_bcf_kernel(half *a, half *b, half *c, int M, int N, int K) {
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int tid = ty * blockDim.x + tx;
+    __shared__ half s_a[BK][BM], s_b[BK][BN];
+
+    half r_load_a[TM / 2];
+    half r_load_b[TN / 2];
+    half r_comp_a[TM];
+    half r_comp_b[TN];
+    half r_load_c[TM][TN] = {__float2half(0.0f)};
+
+    int load_smem_a_m = tid / 2; // 0,1,2,..127
+    int load_smem_a_k = (tid & 1) << 2; // 0 or 4
+    int load_smem_b_k = tid / 32;
+    int load_smem_b_n = (tid & 31) << 2; 
+
+    int load_gmem_a_m = by * BM + load_smem_a_m;
+    int load_gmem_b_n = bx * BN + load_smem_b_n;
+
+    if (load_gmem_a_m >= M || load_gmem_b_n >= N) {
+        return;
+    }
+
+    for (int bk=0; bk<(K + BK - 1) / BK; bk++) {
+        int load_gmem_a_k = bk * BK + load_smem_a_k;
+        int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+        int load_gmem_b_k = bk * BK + load_smem_b_k;
+        int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+        // load data from GBM to Registers
+        HALF2(r_load_a[0]) = HALF2(a[load_gmem_a_addr + 0]);
+        HALF2(r_load_a[2]) = HALF2(a[load_gmem_a_addr + 2]);
+        HALF2(r_load_b[0]) = HALF2(b[load_gmem_b_addr + 0]);
+        HALF2(r_load_b[2]) = HALF2(b[load_gmem_b_addr + 2]);
+
+        // registers to SM
+        s_a[load_smem_a_k + 0][load_smem_a_m] = r_load_a[0];
+        s_a[load_smem_a_k + 1][load_smem_a_m] = r_load_a[1];
+        s_a[load_smem_a_k + 2][load_smem_a_m] = r_load_a[2];
+        s_a[load_smem_a_k + 3][load_smem_a_m] = r_load_a[3];
+        HALF2(s_b[load_smem_b_k][load_smem_b_n + 0]) = HALF2(r_load_b[2]);
+        HALF2(s_b[load_smem_b_k][load_smem_b_n + 2]) = HALF2(r_load_b[2]);
+
+        __syncthreads();
+
+#pragma unroll
+        for (int tk=0; tk < BK; tk++) {
+            HALF2(r_comp_a[0]) = HALF2(s_a[tk][ty * TM / 2]);
+            HALF2(r_comp_a[2]) = HALF2(s_a[tk][ty * TM / 2 + 2]);
+            HALF2(r_comp_a[4]) = HALF2(s_a[tk][ty * TM / 2 + BM / 2]);
+            HALF2(r_comp_a[6]) = HALF2(s_a[tk][ty * TM / 2 + BM / 2 + 2]);
+
+            HALF2(r_comp_b[0]) = HALF2(s_b[tk][tx * TN / 2]);
+            HALF2(r_comp_b[2]) = HALF2(s_b[tk][tx * TN / 2 + 2]);
+            HALF2(r_comp_b[4]) = HALF2(s_b[tk][tx * TN / 2 + BN / 2]);
+            HALF2(r_comp_b[6]) = HALF2(s_b[tk][tx * TN / 2 + BN / 2 + 2]);
+#pragma unroll
+            for (int tm=0; tm<TM; tm++) {
+#pragma unroll
+                for (int tn=0; tn<TN; tn++) {
+                    r_c[tm][tn] += r_comp_a[tm] * r_comp_b[tn];
+                }
+            }
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int i=0; i < TM / 2; i++) {
+        int store_gmem_c_m = by * BM + ty * TM / 2 + i;
+        int store_gmem_c_n = bx * BN + tx * TN / 2;
+        int store_gmem_c_addr = store_gmem_c_m * N + store_gmem_c_n;
+        HALF2(c[store_c_gmem_addr + 0]) = HALF2(r_c[i][0]);
+        HALF2(c[store_c_gmem_addr + 2]) = HALF2(r_c[i][2]);
+        HALF2(c[store_c_gmem_addr + BN / 2 + 0]) = HALF2(r_c[i][4]);
+        HALF2(c[store_c_gmem_addr + BN / 2 + 2]) = HALF2(r_c[i][6]);
+    }
+#pragma unroll
+    for (int i = 0; i < TM / 2; i++) {
+        int store_c_gmem_m = by * BM + BM / 2 + ty * TM / 2 + i;
+        int store_c_gmem_n = bx * BN + tx * TN / 2;
+        int store_c_gmem_addr = store_c_gmem_m * N + store_c_gmem_n;
+        HALF2(c[store_c_gmem_addr + 0]) = HALF2(r_c[i + TM / 2][0]);
+        HALF2(c[store_c_gmem_addr + 2]) = HALF2(r_c[i + TM / 2][2]);
+        HALF2(c[store_c_gmem_addr + BN / 2 + 0]) = HALF2(r_c[i + TM / 2][4]);
+        HALF2(c[store_c_gmem_addr + BN / 2 + 2]) = HALF2(r_c[i + TM / 2][6]);
+    }
+}
