@@ -288,3 +288,84 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_bcf_kernel(half *a, half *b, half *c,
         HALF2(c[store_c_gmem_addr + BN / 2 + 2]) = HALF2(r_c[i + TM / 2][6]);
     }
 }
+
+template <const int BM=128, const int BN=128, const int BK=8,
+    const int TM=8, const int TN=8>
+__global__ void hgemm_t_8x8_sliced_k_f16x4_pack_bcf_kernel(half *a, half *b, half *c, int M, int N, int K) {
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int tid = ty * blockDim.x + tx;
+
+    __shared__ half s_a[BK][BM], s_b[BK][BN];
+
+    half r_load_a[TM / 2];
+    half r_load_b[TN / 2];
+    half r_comp_a[TM];
+    half r_comp_b[TN];
+    half r_c[TM][TN] = {__float2half(0.0f)};
+
+    int load_smem_a_m = tid / 2;
+    int load_smem_a_k = (tid & 1) << 2;
+    int load_smem_b_k = tid / 32;
+    int load_smem_b_n = (tid & 31) << 2; // 0,4,8,,,,124
+    
+    int load_gmem_a_m = by * BM + load_smem_a_m;
+    int load_gmem_b_n = bx * BN + load_smem_b_n;
+
+    if (load_gmem_a_m >= M || load_gmem_b_n >= N) return;
+
+    for (int bk=0; bk< (K + BK - 1) / BK; bk++) {
+        int load_gmem_a_k = bk * BK + load_smem_a_k;
+        int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+        int load_gmem_b_k = bk * BK + load_smem_b_k;
+        int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+
+        // read data from HBM to Registers
+        LDST64BITS(r_load_a[0]) = LDST64BITS(a[load_gmem_a_addr]);
+        LDST64BITS(r_load_b[0]) = LDST64BITS(b[load_gmem_b_addr]);
+
+        // read data from reg to SM
+        s_a[load_smem_a_k][load_smem_a_m] = r_load_a[0];
+        s_a[load_smem_a_k + 1][load_smem_a_m] = r_load_a[1];
+        s_a[load_smem_a_k + 2][load_smem_a_m] = r_load_a[2];
+        s_a[load_smem_a_k + 3][load_smem_a_m] = r_load_a[3];
+
+        LDST64BITS(s_b[load_smem_b_k][load_smem_b_n]) = LDST64BITS(r_load_b[0]);
+        __syncthreads();
+
+#pragma unroll
+        for (int tk=0; tk < BK; tk++) {
+            LDST64BITS(r_comp_a[0]) = LDST64BITS(s_a[tk][ty * TM / 2]);
+            LDST64BITS(r_comp_a[4]) = LDST64BITS(s_a[tk][ty * TM / 2 + BM / 2]);
+
+            LDST64BITS(r_comp_b[0]) = LDST64BITS(s_b[tk][tx * TN / 2]);
+            LDST64BITS(r_comp_b[4]) = LDST64BITS(s_b[tk][tx * TN / 2 + BN / 2]);
+#pragma unroll
+            for (int tm=0; tm < TM; tm++) {
+#pragma unroll
+                for (int tn=0; tn < TN; tn++) {
+                    r_c[tm][tn] = __hfma(r_comp_a[tm], r_comp_b[tn], r_c[tm][tn]);
+                }
+            }
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int i=0; i < TM / 2; i++) {
+        int store_gmem_c_m = by * BM + ty * TM / 2 + i;
+        int store_gmem_c_n = bx * BN + tx * TN / 2;
+        int store_gmem_c_addr = store_gmem_c_m * N + store_gmem_c_n;
+        LDST64BITS(c[store_c_gmem_addr]) = LDST64BITS(r_c[i][0]);
+        LDST64BITS(c[store_c_gmem_addr + BN / 2]) = LDST64BITS(r_c[i][4]);
+    }
+#pragma unroll
+    for (int i = 0; i < TM / 2; i++) {
+        int store_c_gmem_m = by * BM + BM / 2 + ty * TM / 2 + i;
+        int store_c_gmem_n = bx * BN + tx * TN / 2;
+        int store_c_gmem_addr = store_c_gmem_m * N + store_c_gmem_n;
+        LDST64BITS(c[store_c_gmem_addr]) = LDST64BITS(r_c[i + TM / 2][0]);
+        LDST64BITS(c[store_c_gmem_addr + BN / 2]) = LDST64BITS(r_c[i + TM / 2][4]);
+    }
+}
