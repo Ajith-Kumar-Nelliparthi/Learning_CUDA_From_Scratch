@@ -74,5 +74,5 @@ Output:
              out_f16x8pack(t8x8bcf): ['76.375    ', '4.41015625'], time:18.95818ms, GFLOPS: 7249.58 , TFLOPS: 7.25  (+4.47%)
             out_f16x8pack(t8x8dbuf): ['76.375    ', '4.41015625'], time:18.43931ms, GFLOPS: 7453.58 , TFLOPS: 7.45  (+2.81%)
                          out_f16_th: ['76.1875   ', '4.8828125 '], time:5.836868ms, GFLOPS: 23546.69, TFLOPS: 23.55 (+215.91%)
-![alt text](image.png)
 ```
+![alt text](image.png)
