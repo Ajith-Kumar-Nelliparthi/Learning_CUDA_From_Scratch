@@ -211,7 +211,7 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_bcf_kernel(half *a, half *b, half *c,
     half r_load_b[TN / 2];
     half r_comp_a[TM];
     half r_comp_b[TN];
-    half r_load_c[TM][TN] = {__float2half(0.0f)};
+    half r_c[TM][TN] = {__float2half(0.0f)};
 
     int load_smem_a_m = tid / 2; // 0,1,2,..127
     int load_smem_a_k = (tid & 1) << 2; // 0 or 4
@@ -241,7 +241,7 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_bcf_kernel(half *a, half *b, half *c,
         s_a[load_smem_a_k + 1][load_smem_a_m] = r_load_a[1];
         s_a[load_smem_a_k + 2][load_smem_a_m] = r_load_a[2];
         s_a[load_smem_a_k + 3][load_smem_a_m] = r_load_a[3];
-        HALF2(s_b[load_smem_b_k][load_smem_b_n + 0]) = HALF2(r_load_b[2]);
+        HALF2(s_b[load_smem_b_k][load_smem_b_n + 0]) = HALF2(r_load_b[0]);
         HALF2(s_b[load_smem_b_k][load_smem_b_n + 2]) = HALF2(r_load_b[2]);
 
         __syncthreads();
@@ -432,7 +432,7 @@ __global__ void hgemm_t_8x8_sliced_k_f16x8_pack_bcf_kernel(half *a, half *b, hal
 #pragma unroll
     for (int i=0; i<TM; i++) {
         int store_gmem_c_m = by * BM + ty * TM + i;
-        int store_gmem_c_n = bx * BN + ty * TN;
+        int store_gmem_c_n = bx * BN + tx * TN;
         int store_gmem_c_addr = store_gmem_c_m * N + store_gmem_c_n;
         LDST128BITS(c[store_gmem_c_addr]) = LDST128BITS(r_c[i][0]);
     }
@@ -510,7 +510,7 @@ __global__ void hgemm_t_8x8_sliced_k_f16x8_pack_bcf_dbuf_kernel(half *a, half *b
         }
         s_a[smem_sel_next][load_smem_a_k + 0][load_smem_a_m] = r_load_a[0];
         s_a[smem_sel_next][load_smem_a_k + 1][load_smem_a_m] = r_load_a[1];
-        s_a[smem_sel_next][load_smem_a_m + 2][load_smem_a_m] = r_load_a[2];
+        s_a[smem_sel_next][load_smem_a_k + 2][load_smem_a_m] = r_load_a[2];
         s_a[smem_sel_next][load_smem_a_k + 3][load_smem_a_m] = r_load_a[3];
         LDST64BITS(s_b[smem_sel_next][load_smem_b_k][load_smem_b_n]) = LDST64BITS(r_load_b[0]);
         __syncthreads();
