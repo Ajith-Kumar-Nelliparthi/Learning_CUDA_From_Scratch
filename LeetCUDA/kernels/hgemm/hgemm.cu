@@ -272,10 +272,10 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_bcf_kernel(half *a, half *b, half *c,
         int store_gmem_c_m = by * BM + ty * TM / 2 + i;
         int store_gmem_c_n = bx * BN + tx * TN / 2;
         int store_gmem_c_addr = store_gmem_c_m * N + store_gmem_c_n;
-        HALF2(c[store_c_gmem_addr + 0]) = HALF2(r_c[i][0]);
-        HALF2(c[store_c_gmem_addr + 2]) = HALF2(r_c[i][2]);
-        HALF2(c[store_c_gmem_addr + BN / 2 + 0]) = HALF2(r_c[i][4]);
-        HALF2(c[store_c_gmem_addr + BN / 2 + 2]) = HALF2(r_c[i][6]);
+        HALF2(c[store_gmem_c_addr + 0]) = HALF2(r_c[i][0]);
+        HALF2(c[store_gmem_c_addr + 2]) = HALF2(r_c[i][2]);
+        HALF2(c[store_gmem_c_addr + BN / 2 + 0]) = HALF2(r_c[i][4]);
+        HALF2(c[store_gmem_c_addr + BN / 2 + 2]) = HALF2(r_c[i][6]);
     }
 #pragma unroll
     for (int i = 0; i < TM / 2; i++) {
@@ -357,8 +357,8 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_pack_bcf_kernel(half *a, half *b, hal
         int store_gmem_c_m = by * BM + ty * TM / 2 + i;
         int store_gmem_c_n = bx * BN + tx * TN / 2;
         int store_gmem_c_addr = store_gmem_c_m * N + store_gmem_c_n;
-        LDST64BITS(c[store_c_gmem_addr]) = LDST64BITS(r_c[i][0]);
-        LDST64BITS(c[store_c_gmem_addr + BN / 2]) = LDST64BITS(r_c[i][4]);
+        LDST64BITS(c[store_gmem_c_addr]) = LDST64BITS(r_c[i][0]);
+        LDST64BITS(c[store_gmem_c_addr + BN / 2]) = LDST64BITS(r_c[i][4]);
     }
 #pragma unroll
     for (int i = 0; i < TM / 2; i++) {
@@ -372,7 +372,7 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_pack_bcf_kernel(half *a, half *b, hal
 
 template <const int BM=128, const int BN=128, const int BK=8,
             const int TM=8, const int TN=8, const int offset = 0>
-__global__ void hgemm_t_8x8_sliced_k_f16x8_pack_bcf_kernel(half *a, half *b, hlaf *c, int M, int N, int K) {
+__global__ void hgemm_t_8x8_sliced_k_f16x8_pack_bcf_kernel(half *a, half *b, half *c, int M, int N, int K) {
     int bx = blockIdx.x;
     int by = blockIdx.y;
     int tx = threadIdx.x;
