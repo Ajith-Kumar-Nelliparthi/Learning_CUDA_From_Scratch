@@ -16,7 +16,7 @@
 #define FLOAT4(value) (reinterpret_cast<float *>(&(value))[0])
 #define HALF2(value) (reinterpret_cast<half2 *>(&(value))[0])
 #define BFLOAT2(value) (reinterpret_cast<__nv_bfloat162 *>(&(value))[0])
-#define LDST64BITS(value) (reinterpret_cast<half2 *>(&(value))[0])
+#define LDST64BITS(value) (reinterpret_cast<float2 *>(&(value))[0])
 #define LDST128BITS(value) (reinterpret_cast<float4 *>(&(value))[0])
 
 // fp 16
@@ -56,7 +56,7 @@ __global__ void hgemm_sliced_k_f16_kernel(half *a, half *b, half *c, int M, int 
     }
 
     half sum = __float2half(0.0f);
-    for (int bk=0; bk<BK; bk++) {
+    for (int bk=0; bk<(K + BK - 1) / BK; bk++) {
         int load_gmem_a_k = bk * BK + load_smem_a_k;
         int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
         int load_gmem_b_k = bk * BK + load_smem_b_k;
@@ -179,7 +179,7 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_pack_kernel(half *a, half *b, half *c
                 for (int n=0; n<TN; n++) {
                     int comp_smem_a_m = ty * TM + m;
                     int comp_smem_b_n = tx * TN + n;
-                    r_c[m][n] += __hfma(s_a[comp_smem_a_m][k] , s_b[k][comp_smem_b_n], r_c[m][n]);
+                    r_c[m][n] = __hfma(s_a[comp_smem_a_m][k] , s_b[k][comp_smem_b_n], r_c[m][n]);
                 }
             }
         }
@@ -189,7 +189,7 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_pack_kernel(half *a, half *b, half *c
     for (int m=0; m<TM; m++) {
         int store_gmem_c_m = by * BM + ty * TM + m;
 #pragma unroll
-        for (int n=0; n<TN; n++) {
+        for (int n=0; n<TN; n+= 4) {
             int store_gmem_c_n = bx * BN + tx * TN + n;
             int store_gmem_c_addr = store_gmem_c_m * N + store_gmem_c_n;
             LDST64BITS(c[store_gmem_c_addr]) = LDST64BITS(r_c[m][n]);
@@ -767,6 +767,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   TORCH_BINDING_COMMON_EXTENSION(hgemm_naive_f16)
   TORCH_BINDING_COMMON_EXTENSION(hgemm_sliced_k_f16)
   TORCH_BINDING_COMMON_EXTENSION(hgemm_t_8x8_sliced_k_f16x4)
+  TORCH_BINDING_COMMON_EXTENSION(hgemm_t_8x8_sliced_k_f16x4_pack)
   TORCH_BINDING_COMMON_EXTENSION(hgemm_t_8x8_sliced_k_f16x4_bcf)
   TORCH_BINDING_COMMON_EXTENSION(hgemm_t_8x8_sliced_k_f16x4_pack_bcf)
   TORCH_BINDING_COMMON_EXTENSION(hgemm_t_8x8_sliced_k_f16x8_pack_bcf)
