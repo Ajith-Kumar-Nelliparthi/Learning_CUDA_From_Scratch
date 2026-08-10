@@ -21,7 +21,7 @@
 
 // fp 16
 // hgemm naive kernel
-__global__ void hgemm_naive_kernel(half *a, half *b, half *c, int M, int N, int K) {
+__global__ void hgemm_naive_f16_kernel(half *a, half *b, half *c, int M, int N, int K) {
     int m = blockIdx.y * blockDim.y + threadIdx.y;
     int n = blockIdx.x * blockDim.x + threadIdx.x;
     if (m < M && n < N) {
@@ -537,4 +537,226 @@ __global__ void hgemm_t_8x8_sliced_k_f16x8_pack_bcf_dbuf_kernel(half *a, half *b
         int store_gmem_c_adr = store_gmem_c_m * N + store_gmem_c_n;
         LDST128BITS(c[store_gmem_c_adr]) = LDST128BITS(r_c[i][0]);
     }
+}
+
+#define STRINGFY(str) #str
+#define TORCH_BINDING_COMMON_EXTENSION(func)                                   \
+  m.def(STRINGFY(func), &func, STRINGFY(func));
+
+#define CHECK_TORCH_TENSOR_DTYPE(T, th_type)                                   \
+  if (((T).options().dtype() != (th_type))) {                                  \
+    std::cout << "Tensor Info:" << (T).options() << std::endl;                 \
+    throw std::runtime_error("values must be " #th_type);                      \
+  }
+
+#define CHECK_TORCH_TENSOR_SHAPE(T, S0, S1)                                    \
+  if (((T).size(0) != (S0)) || ((T).size(1) != (S1))) {                        \
+    throw std::runtime_error("Tensor size mismatch!");                         \
+  }
+
+// HGEMM naive: compute one c[i,j] element per threads, all row major
+void hgemm_naive_f16(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int BM = 32;
+  constexpr int BN = 32;
+
+  dim3 block(BN, BM);
+  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+  hgemm_naive_f16_kernel<<<grid, block>>>(
+      reinterpret_cast<half *>(a.data_ptr()),
+      reinterpret_cast<half *>(b.data_ptr()),
+      reinterpret_cast<half *>(c.data_ptr()), M, N, K);
+}
+
+void hgemm_sliced_k_f16(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int BM = 32;
+  constexpr int BN = 32;
+  constexpr int BK = 32;
+
+  dim3 block(BN, BM);
+  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+  hgemm_sliced_k_f16_kernel<BM, BN, BK>
+      <<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                        reinterpret_cast<half *>(b.data_ptr()),
+                        reinterpret_cast<half *>(c.data_ptr()), M, N, K);
+}
+
+// t 8x8 fp16x4
+void hgemm_t_8x8_sliced_k_f16x4(torch::Tensor a, torch::Tensor b,
+                                torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int BM = 128;
+  constexpr int BN = 128;
+  constexpr int BK = 8;
+  constexpr int TM = 8;
+  constexpr int TN = 8;
+
+  dim3 block(BN / TN, BM / TM);
+  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+  hgemm_t_8x8_sliced_k_f16x4_kernel<BM, BN, BK, TM, TN>
+      <<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                        reinterpret_cast<half *>(b.data_ptr()),
+                        reinterpret_cast<half *>(c.data_ptr()), M, N, K);
+}
+
+// t 8x8 fp16x4 pack
+void hgemm_t_8x8_sliced_k_f16x4_pack(torch::Tensor a, torch::Tensor b,
+                                     torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int BM = 128;
+  constexpr int BN = 128;
+  constexpr int BK = 8;
+  constexpr int TM = 8;
+  constexpr int TN = 8;
+
+  dim3 block(BN / TN, BM / TM);
+  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+  hgemm_t_8x8_sliced_k_f16x4_pack_kernel<BM, BN, BK, TM, TN>
+      <<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                        reinterpret_cast<half *>(b.data_ptr()),
+                        reinterpret_cast<half *>(c.data_ptr()), M, N, K);
+}
+
+// reduce bank conflicts
+void hgemm_t_8x8_sliced_k_f16x4_bcf(torch::Tensor a, torch::Tensor b,
+                                    torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int BM = 128;
+  constexpr int BN = 128;
+  constexpr int BK = 8;
+  constexpr int TM = 8;
+  constexpr int TN = 8;
+
+  dim3 block(BN / TN, BM / TM);
+  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+  hgemm_t_8x8_sliced_k_f16x4_bcf_kernel<BM, BN, BK, TM, TN>
+      <<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                        reinterpret_cast<half *>(b.data_ptr()),
+                        reinterpret_cast<half *>(c.data_ptr()), M, N, K);
+}
+
+// reduce bank conflicts, f16x4 pack, t 8x8
+void hgemm_t_8x8_sliced_k_f16x4_pack_bcf(torch::Tensor a, torch::Tensor b,
+                                         torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int BM = 128;
+  constexpr int BN = 128;
+  constexpr int BK = 8;
+  constexpr int TM = 8;
+  constexpr int TN = 8;
+
+  dim3 block(BN / TN, BM / TM);
+  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+  hgemm_t_8x8_sliced_k_f16x4_pack_bcf_kernel<BM, BN, BK, TM, TN, 4>
+      <<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                        reinterpret_cast<half *>(b.data_ptr()),
+                        reinterpret_cast<half *>(c.data_ptr()), M, N, K);
+}
+
+// reduce bank conflicts, t 8x8 fp16x8 pack, pad
+void hgemm_t_8x8_sliced_k_f16x8_pack_bcf(torch::Tensor a, torch::Tensor b,
+                                         torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int BM = 128;
+  constexpr int BN = 128;
+  constexpr int BK = 8;
+  constexpr int TM = 8;
+  constexpr int TN = 8;
+
+  dim3 block(BN / TN, BM / TM);
+  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+  hgemm_t_8x8_sliced_k_f16x8_pack_bcf_kernel<BM, BN, BK, TM, TN, 8>
+      <<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                        reinterpret_cast<half *>(b.data_ptr()),
+                        reinterpret_cast<half *>(c.data_ptr()), M, N, K);
+}
+
+void hgemm_t_8x8_sliced_k_f16x8_pack_bcf_dbuf(torch::Tensor a, torch::Tensor b,
+                                              torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int BM = 128;
+  constexpr int BN = 128;
+  constexpr int BK = 8;
+  constexpr int TM = 8;
+  constexpr int TN = 8;
+
+  dim3 block(BN / TN, BM / TM);
+  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+  hgemm_t_8x8_sliced_k_f16x8_pack_bcf_dbuf_kernel<BM, BN, BK, TM, TN, 8>
+      <<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                        reinterpret_cast<half *>(b.data_ptr()),
+                        reinterpret_cast<half *>(c.data_ptr()), M, N, K);
 }
