@@ -179,7 +179,7 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_pack_kernel(half *a, half *b, half *c
                 for (int n=0; n<TN; n++) {
                     int comp_smem_a_m = ty * TM + m;
                     int comp_smem_b_n = tx * TN + n;
-                    r_c[m][n] += __hfma(s_a[comp_smem_a_m][k] , s_b[k][comp_smem_b_n]);
+                    r_c[m][n] += __hfma(s_a[comp_smem_a_m][k] , s_b[k][comp_smem_b_n], r_c[m][n]);
                 }
             }
         }
@@ -290,7 +290,7 @@ __global__ void hgemm_t_8x8_sliced_k_f16x4_bcf_kernel(half *a, half *b, half *c,
 }
 
 template <const int BM=128, const int BN=128, const int BK=8,
-    const int TM=8, const int TN=8>
+    const int TM=8, const int TN=8, const int OFFSET=0>
 __global__ void hgemm_t_8x8_sliced_k_f16x4_pack_bcf_kernel(half *a, half *b, half *c, int M, int N, int K) {
     int bx = blockIdx.x;
     int by = blockIdx.y;
@@ -759,4 +759,16 @@ void hgemm_t_8x8_sliced_k_f16x8_pack_bcf_dbuf(torch::Tensor a, torch::Tensor b,
       <<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
                         reinterpret_cast<half *>(b.data_ptr()),
                         reinterpret_cast<half *>(c.data_ptr()), M, N, K);
+}
+
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  // CUDA Cores
+  TORCH_BINDING_COMMON_EXTENSION(hgemm_naive_f16)
+  TORCH_BINDING_COMMON_EXTENSION(hgemm_sliced_k_f16)
+  TORCH_BINDING_COMMON_EXTENSION(hgemm_t_8x8_sliced_k_f16x4)
+  TORCH_BINDING_COMMON_EXTENSION(hgemm_t_8x8_sliced_k_f16x4_bcf)
+  TORCH_BINDING_COMMON_EXTENSION(hgemm_t_8x8_sliced_k_f16x4_pack_bcf)
+  TORCH_BINDING_COMMON_EXTENSION(hgemm_t_8x8_sliced_k_f16x8_pack_bcf)
+  TORCH_BINDING_COMMON_EXTENSION(hgemm_t_8x8_sliced_k_f16x8_pack_bcf_dbuf)
 }
