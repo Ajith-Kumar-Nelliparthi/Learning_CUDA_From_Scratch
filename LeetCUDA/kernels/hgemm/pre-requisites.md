@@ -28,9 +28,9 @@
 - [x] HGEMM MMA & WMMA cuda kernels implementation
 - [x] SGEMM MMA & WMMA cuda kernels implementation
 - [x] (SGEMM , HGEMM) double buffer kernels vs cp.async (asyncronus pipelining) . Compare and differentiate logic
-- [x] Flash Attention Implementation (Naive)
+- [x] Flash Attention Implementation (Naive) [l](https://gordicaleksa.medium.com/eli5-flash-attention-5c44017022ad)
 
-- [x] LLM Inference Optimization
+- [x] [LLM Inference Optimization](https://www.aleksagordic.com/blog/vllm)
     - [x] GQA/YOCO/CLA/MLKV: Sharing KV Cache Between Layers [l](https://zhuanlan.zhihu.com/p/697311739)
     - [x] Automatic Prefix Caching [l](https://zhuanlan.zhihu.com/p/693556044)
     - [x] From Online-Softmax to FlashAttention V1/V2/V3 [l](https://zhuanlan.zhihu.com/p/668888063)
