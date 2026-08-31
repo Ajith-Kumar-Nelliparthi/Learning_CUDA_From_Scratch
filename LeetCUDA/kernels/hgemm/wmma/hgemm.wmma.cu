@@ -126,3 +126,93 @@ int div_ceil(int a, int b) { return (a % b != 0) ? (a / b + 1) : (a / b); }
     const int store_gmem_b_n = bx * BN + warp_n * WMMA_N;
     wmma::store_matrix_sync(C + store_gmem_a_m * N + store_gmem_b_n, C_frag, N, wmma::mem_row_major);
  }
+
+ template <const int WMMA_M = 16, const int WMMA_N = 16, const int WMMA_K = 16,
+            const int WMMA_TILE_M = 4, const int WMMA_TILE_N = 2, 
+            const int WARP_TILE_M = 2, const int WARP_TILE_N = 4>
+__global__ void hgemm_wmma_m16n16k16_mma4x2_warp2x4_kernel(half *A, half *B, half *C, int M, int N, int K) {
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
+    const int NUM_K_TILES = div_ceil(K, WMMA_K);
+    constexpr int BM = WMMA_M * WMMA_TILE_M * WARP_TILE_M;  // 16x4x2 = 128
+    constexpr int BN = WMMA_N * WMMA_TILE_N * WARP_TILE_N;  // 16*2*4 = 128
+    constexpr BK = WMMA_K;
+    __shared__ half s_a[BM][BK], s_b[BK][BN];   // 16x128x2bytes = 4KB
+
+    // index cal
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    const int warp_id = tid / WARP_SIZE;        // 0 to 7
+    const int lane_id = tid % WARP_SIZE;        // 0 to 31
+    const int warp_m = warp_id / 2;
+    const int warp_n = warp_id % 2;
+
+    // shared mem index cal
+    int load_smem_a_m = tid / 2;    // row 0 to 127
+    // 1 thread reads first 8 elements and the other half reads the left total covering 16 values in a row
+    // 128 rows x 2 threads per row = 256 (total threads)
+    int load_smem_a_k = (tid % 2 == 0) ? 0 : 8; // col 0-7 , 8-15
+    int load_smem_b_k = tid / 16;   // row 0 to 15
+    int load_smem_b_n = (tid % 16) * 8;
+
+    // global index
+    int load_gmem_a_m = by * BM + load_smem_a_m;
+    int load_gmem_b_n = bx * BN + load_smem_b_n;
+    if (load_gmem_a_m >= M || load_gmem_b_n >= N) return;
+
+    // load into fragment
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, half>C_frag[WARP_TILE_M][WARP_TILE_N];
+#pragma unroll
+    for (int i=0; i< WARP_TILE_M; i++) {
+        for (int j=0; j< WARP_TILE_N; j++) {
+            wmma::fill_fragment(C_frag[i][j], 0.0);
+        }
+    }
+
+#pragma unroll
+    for (int k=0; k<NUM_K_TILES; k++) {
+        int load_gmem_a_k = k * WMMA_K + load_smem_a_k;
+        int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+        int load_gmem_b_k = k * WMMA_K + load_smem_b_k;
+        int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+        LDST128BITS(s_b[load_smem_b_k][load_smem_b_n]) = LDST128BITS(B[load_gmem_b_addr]);
+        LDST128BITS(s_a[load_smem_a_m][load_smem_a_k]) = LDST128BITS(A[load_gmem_a_addr]);
+        __syncthreads();
+
+        wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>A_frag[WARP_TILE_M];
+        wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>B_frag[WARP_TILE_N];
+
+    #pragma unroll
+        for (int i=0; i<WARP_TILE_M; i++) {
+            // load 2 tiles -> reg, smem a -> frags a
+            // each warp loads 2 16x16 tiles of A from SMEM
+            const int warp_smem_a_m = warp_m * (WMMA_M * WARP_TILE_M) + i * WMMA_M;
+            wmma::load_matrix_sync(A_frag[i], &s_a[warp_smem_a_m][0], BK);
+        }
+    #pragma unroll
+        for (int j=0; j < WARP_TILE_N; j++) {
+            // load 4 tiles -> reg, smem b -> frags B
+            const int warp_smem_b_n = warp_n * (WMMA_N * WARP_TILE_N) + j * WMMA_N;
+            wmma::load_matrix_sync(B_frag[j], &s_b[0][warp_smem_b_n], BN);
+        }
+
+    #pragma unroll
+        for (int i=0; i<WARP_TILE_M; i++) {
+    #pragma unroll
+            for (int j=0; j<WARP_TILE_N; j++) {
+                wmma::mma_sync(C_frag[i][j], A_frag[i][j], B_frag[i][j], C_frag[i][j]);
+            }
+        }
+        __syncthreads();
+    }
+
+    // store results
+#pragma unroll
+    for (int i=0; i<WARP_TILE_M; i++) {
+#pragma unroll
+        for (int j=0; j<WARP_TILE_N; j++) {
+            const int store_gmem_a_m = by * BM + warp_m * (WMMA_M * WARP_TILE_M) + i * WMMA_M;
+            const int store_gmem_b_n = bx * BN + warp_n * (WMMA_N * WARP_TILE_N) + j * WMMA_N;
+            wmma::store_matrix_sync(C + store_gmem_a_m * N + store_gmem_b_n, C_frag[i][j], N, wmma::mem_row_major);
+        }
+    }
+}
