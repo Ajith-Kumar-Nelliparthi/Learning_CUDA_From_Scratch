@@ -363,3 +363,316 @@ __global__ void hgemm_wmma_m16n16k16_mma4x2_warp2x4_dbuf_async_kernel(half *A, h
         }
     }
 }
+
+
+template <const int WMMA_M = 32, const int WMMA_N = 8, const int WMMA_K = 16,
+            const int WMMA_TILE_M = 2, const int WMMA_TILE_N = 4,
+            const int WARP_TILE_M = 2, const int WARP_TILE_N = 4,
+            const int OFFSET = 0>
+__global__ void hgemm_wmma_m32n8k16_mma2x4_warp2x4_dbuf_async_kernel(half *A, half *B, half *C, int M, int N, int K) {
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
+    const int NUM_K_TILES = div_ceil(K, WMMA_K);
+    constexpr int BM = WMMA_M * WMMA_TILE_M * WARP_TILE_M;  // 32x2x2 = 128
+    constexpr int BN = WMMA_N * WMMA_TILE_N * WARP_TILE_N;  // 8*4*4 = 128
+    constexpr BK = WMMA_K;
+    __shared__ half s_a[2][BM][BK + OFFSET], s_b[2][BK][BN + OFFSET];   // 16x128x2bytes = 4KB
+
+    // index calculation
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    const int warp_id = tid / WARP_SIZE;        // 0 to 7
+    const int lane_id = tid % WARP_SIZE;        // 0 to 31
+    const int warp_m = warp_id / 4;     // 0,1
+    const int warp_n = warp_id % 4;    // 0,1,2,3
+
+    // shared memory index calculation
+    int load_smem_a_m = tid / 2;    // row 0 to 127
+    int load_smem_a_k = (tid % 2 == 0) ? 0 : 8; // col 0-7 , 8-15
+    int load_smem_b_k = tid / 16;  // row 0 to 15
+    int load_smem_b_n = (tid % 16) * 8;     // col 0,8, - 120
+    int load_gmem_a_m = by * BM + load_smem_a_m;
+    int load_gmem_b_n = bx * BN + load_smem_b_n;
+    if (load_gmem_a_m >= M || load_gmem_b_n >= N) return;
+
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, half>C_frag[WARP_TILE_M][WARP_TILE_N];
+#pragma unroll
+    for (int i=0; i<WARP_TILE_M; i++) {
+#pragma unroll
+        for (int j=0; j<WARP_TILE_N; j++) {
+            wmma::fill_fragment(C_frag[i][j], 0.0);
+        }
+    }
+
+    // load first buffer, k=0
+    {
+        int load_gmem_a_k = load_smem_a_k;
+        int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+        int load_gmem_b_k = load_smem_b_k;
+        int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+        unit32_t load_smem_a_ptr = 
+                __cvta_generic_to_shared(&s_a[0][load_smem_a_m][load_smem_a_k]);
+        CP_ASYNC_CG(load_smem_a_ptr, &A[load_gmem_a_addr], 16);
+        unit32_t load_smem_b_ptr = 
+                __cvta_generic_to_shared(&s_b[0][load_smem_b_k][load_smem_b_n]);
+        CP_ASYNC_CG(load_smem_b_ptr, &B[load_gmem_b_addr], 16);
+        CP_ASYNC_COMMIT_GROUP();
+        CP_ASYNC_WAIT_GROUP(0);
+    }
+    __syncthreads();
+
+#pragma unroll
+    for (int k=0; k < NUM_K_TILES; k++) {
+        int smem_sel = (k - 1) & 1; // 0 or 1
+        int smem_sel_next = k & 1; // 1 or 0
+
+        int load_gmem_a_k = k * WMMA_K + load_smem_a_k;
+        int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+        int load_gmem_b_k = k * WMMA_K + load_smem_b_k;
+        int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+
+        // load next buffer
+        unit32_t load_smem_a_ptr = 
+            __cvta_generic_to_shared(&s_a[smem_sel_next][load_smem_a_m][load_smem_a_k]);
+        CP_ASYNC_CG(load_smem_a_ptr, &A[load_gmem_a_addr], 16);
+        unit32_t load_smem_b_ptr =
+            __cvta_generic_to_shared(&s_b[smem_sel_next][load_smem_b_k][load_smem_b_n]);
+        CP_ASYNC_CG(load_smem_b_ptr, &B[load_gmem_b_addr], 16);
+
+        // load mat frags from smem to reg
+        wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>A_frag[WARP_TILE_M];
+        wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>B_frag[WARP_TILE_N];
+
+    #pragma unroll
+        for (int i=0; i<WARP_TILE_M; i++) {
+            // load 2 tiles -> reg, smem a -> frags a
+            const int warp_smem_a_m = warp_m * (WMMA_M * WARP_TILE_M) + i * WMMA_M;
+            wmma::load_matrix_sync(A_frag[i], &s_a[smem_sel][warp_smem_a_m][0], BK + OFFSET);
+        }
+    #pragma unroll
+        for (int j=0; j<WARP_TILE_N; j++) {
+            // load 4 tiles -> reg, smem b -> frags B
+            const int warp_smem_b_n = warp_n * (WMMA_N * WARP_TILE_N) + j * WMMA_N;
+            wmma::load_matrix_sync(B_frag[j], &s_b[smem_sel][0][warp_smem_b_n], BN + OFFSET);
+        }
+
+    #pragma unroll
+        for (int i=0; i<WARP_TILE_M; i++) {
+    #pragma unroll
+            for (int j=0; j<WARP_TILE_N; j++) {
+                wmma::mma_sync(C_frag[i][j], A_frag[i], B_frag[j], C_frag[i][j]);
+            }
+        }
+        CP_ASYNC_COMMIT_GROUP();
+        CP_ASYNC_WAIT_GROUP(0);
+        __syncthreads();
+    }
+    // process last buffer
+    {
+        wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>A_frag[WARP_TILE_M];
+        wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>B_frag[WARP_TILE_N];
+
+    #pragma unroll
+        for (int i=0; i<WARP_TILE_M; i++) {
+            const int warp_smem_a_m = warp_m * (WMMA_M * WARP_TILE_M) + i * WMMA_M;
+            wmma::load_matrix_sync(A_frag[i], &s_a[1][warp_smem_a_m][0], BK + OFFSET);
+        }
+    #pragma unroll
+        for (int j=0; j<WARP_TILE_N; j++) {
+            const int warp_smem_b_n = warp_n * (WMMA_N * WARP_TILE_N) + j * WMMA_N;
+            wmma::load_matrix_sync(B_frag[j], &s_b[1][0][warp_smem_b_n], BN + OFFSET);
+        }
+    #pragma unroll
+        for (int i=0; i<WARP_TILE_M; i++) {
+    #pragma unroll
+            for (int j=0; j<WARP_TILE_N; j++) {
+                wmma::mma_sync(C_frag[i][j], A_frag[i], B_frag[j], C_frag[i][j]);
+            }
+        }
+    }
+
+    // store results
+#pragma unroll
+    for (int i=0; i<WARP_TILE_M; i++) {
+#pragma unroll
+        for (int j=0; j<WARP_TILE_N; j++) {
+            const int store_gmem_a_m = by * BM + warp_m * (WMMA_M * WARP_TILE_M) + i * WMMA_M;
+            const int store_gmem_b_n = bx * BN + warp_n * (WMMA_N * WARP_TILE_N) + j * WMMA_N;
+            wmma::store_matrix_sync(C + store_gmem_a_m * N + store_gmem_b_n, C_frag[i][j], N, wmma::mem_row_major);
+        }
+    }
+}
+
+// pytorch c/c++ bindings
+#define STRINGFY(str) # str
+#define TORCH_BINDING_COMMON_EXTENSION(func) \
+    m.def(STRINGFY(func), &func, STRINGFY(func));
+
+#define CHECK_TORCH_TENSOR_DTYPE(T, th_type) \
+    if (((T).options().dtype() != (th_type))) { \
+        std::cout << "Tenosr Info: " << (T).options() << std::endl; \
+        throw std::runtime_error("values must be " #th_type) \
+    }
+
+#define CHECK_TORCH_TENSOR_SHAPE(T, S0, S1) \
+    if (((T).size(0) != (S0)) || ((T).size(1) != (S1))) { \
+        std::cout << "Tenosr Info: " << (T).sizes() << std::endl; \
+        throw std::runtime_error("values must be of shape (" #S0 ", " #S1 ")") \
+    }
+
+// 1 warp per block(32 threads)
+void hgemm_wmma_m16n16k16_naive(torch::Tensor a, torch::Tensor b,
+                                torch::Tensor c) {
+    CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+    CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+    CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+    const int M = a.size(0);
+    const int K = a.size(1);
+    const int N = b.size(1);
+    CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+    CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+    CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+    constexpr int WMMA_M = 16;
+    constexpr int WMMA_N = 16;
+    constexpr int WMMA_K = 16;
+
+    dim3 block(WARP_SIZE);
+    dim3 grid(div_ceil(N, WMMA_N), div_ceil(M, WMMA_M));
+
+     hgemm_wmma_m16n16k16_naive_kernel<WMMA_M, WMMA_N, WMMA_K>
+      <<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                        reinterpret_cast<half *>(b.data_ptr()),
+                        reinterpret_cast<half *>(c.data_ptr()), M, N, K);
+}
+
+void hgemm_wmma_m16n16k16_mma4x2(torch::Tensor a, torch::Tensor b,
+                                 torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int WMMA_M = 16;
+  constexpr int WMMA_N = 16;
+  constexpr int WMMA_K = 16;
+  constexpr int WMMA_TILE_M = 4;
+  constexpr int WMMA_TILE_N = 2;
+  constexpr int NUM_THREADS =
+      (WMMA_TILE_M * WMMA_TILE_N * WARP_SIZE); // 4 * 2 * 32 = 256
+
+  dim3 block(NUM_THREADS);
+  dim3 grid(div_ceil(N, WMMA_N * WMMA_TILE_N),
+            div_ceil(M, WMMA_M * WMMA_TILE_M));
+
+  hgemm_wmma_m16n16k16_mma4x2_kernel<WMMA_M, WMMA_N, WMMA_K, WMMA_TILE_M,
+                                     WMMA_TILE_N>
+      <<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                        reinterpret_cast<half *>(b.data_ptr()),
+                        reinterpret_cast<half *>(c.data_ptr()), M, N, K);
+}
+
+void hgemm_wmma_m16n16k16_mma4x2_warp2x4(torch::Tensor a, torch::Tensor b,
+                                         torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int WMMA_M = 16;
+  constexpr int WMMA_N = 16;
+  constexpr int WMMA_K = 16;
+  constexpr int WMMA_TILE_M = 4;
+  constexpr int WMMA_TILE_N = 2;
+  constexpr int WARP_TILE_M = 2;
+  constexpr int WARP_TILE_N = 4;
+  constexpr int NUM_THREADS =
+      (WMMA_TILE_M * WMMA_TILE_N * WARP_SIZE); // 4 * 2 * 32 = 256
+
+  dim3 block(NUM_THREADS);
+  dim3 grid(div_ceil(N, WMMA_N * WMMA_TILE_N * WARP_TILE_N),
+            div_ceil(M, WMMA_M * WMMA_TILE_M * WARP_TILE_M));
+
+  hgemm_wmma_m16n16k16_mma4x2_warp2x4_kernel<WMMA_M, WMMA_N, WMMA_K,
+                                             WMMA_TILE_M, WMMA_TILE_N,
+                                             WARP_TILE_M, WARP_TILE_N>
+      <<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                        reinterpret_cast<half *>(b.data_ptr()),
+                        reinterpret_cast<half *>(c.data_ptr()), M, N, K);
+}
+
+// double buffer, padding
+void hgemm_wmma_m16n16k16_mma4x2_warp2x4_dbuf_async(torch::Tensor a,
+                                                    torch::Tensor b,
+                                                    torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int WMMA_M = 16;
+  constexpr int WMMA_N = 16;
+  constexpr int WMMA_K = 16;
+  constexpr int WMMA_TILE_M = 4;
+  constexpr int WMMA_TILE_N = 2;
+  constexpr int WARP_TILE_M = 2;
+  constexpr int WARP_TILE_N = 4;
+  constexpr int NUM_THREADS =
+      (WMMA_TILE_M * WMMA_TILE_N * WARP_SIZE); // 4 * 2 * 32 = 256
+
+  dim3 block(NUM_THREADS);
+  dim3 grid(div_ceil(N, WMMA_N * WMMA_TILE_N * WARP_TILE_N),
+            div_ceil(M, WMMA_M * WMMA_TILE_M * WARP_TILE_M));
+
+  hgemm_wmma_m16n16k16_mma4x2_warp2x4_dbuf_async_kernel<
+      WMMA_M, WMMA_N, WMMA_K, WMMA_TILE_M, WMMA_TILE_N, WARP_TILE_M,
+      WARP_TILE_N, 8><<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                                       reinterpret_cast<half *>(b.data_ptr()),
+                                       reinterpret_cast<half *>(c.data_ptr()),
+                                       M, N, K);
+}
+
+// m32n8k16
+void hgemm_wmma_m32n8k16_mma2x4_warp2x4_dbuf_async(torch::Tensor a,
+                                                   torch::Tensor b,
+                                                   torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int WMMA_M = 32;
+  constexpr int WMMA_N = 8;
+  constexpr int WMMA_K = 16;
+  constexpr int WMMA_TILE_M = 2;
+  constexpr int WMMA_TILE_N = 4;
+  constexpr int WARP_TILE_M = 2;
+  constexpr int WARP_TILE_N = 4;
+  constexpr int NUM_THREADS =
+      (WMMA_TILE_M * WMMA_TILE_N * WARP_SIZE); // 2 * 4 * 32 = 256
+
+  dim3 block(NUM_THREADS);
+  dim3 grid(div_ceil(N, WMMA_N * WMMA_TILE_N * WARP_TILE_N),
+            div_ceil(M, WMMA_M * WMMA_TILE_M * WARP_TILE_M));
+
+  hgemm_wmma_m32n8k16_mma2x4_warp2x4_dbuf_async_kernel<
+      WMMA_M, WMMA_N, WMMA_K, WMMA_TILE_M, WMMA_TILE_N, WARP_TILE_M,
+      WARP_TILE_N, 8><<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                                       reinterpret_cast<half *>(b.data_ptr()),
+                                       reinterpret_cast<half *>(c.data_ptr()),
+                                       M, N, K);
+}
