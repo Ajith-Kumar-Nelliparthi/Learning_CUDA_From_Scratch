@@ -501,3 +501,178 @@ __global__ void hgemm_wmma_m32n8k16_mma2x4_warp2x4_dbuf_async_kernel(half *A, ha
         }
     }
 }
+
+// pytorch c/c++ bindings
+#define STRINGFY(str) # str
+#define TORCH_BINDING_COMMON_EXTENSION(func) \
+    m.def(STRINGFY(func), &func, STRINGFY(func));
+
+#define CHECK_TORCH_TENSOR_DTYPE(T, th_type) \
+    if (((T).options().dtype() != (th_type))) { \
+        std::cout << "Tenosr Info: " << (T).options() << std::endl; \
+        throw std::runtime_error("values must be " #th_type) \
+    }
+
+#define CHECK_TORCH_TENSOR_SHAPE(T, S0, S1) \
+    if (((T).size(0) != (S0)) || ((T).size(1) != (S1))) { \
+        std::cout << "Tenosr Info: " << (T).sizes() << std::endl; \
+        throw std::runtime_error("values must be of shape (" #S0 ", " #S1 ")") \
+    }
+
+// 1 warp per block(32 threads)
+void hgemm_wmma_m16n16k16_naive(torch::Tensor a, torch::Tensor b,
+                                torch::Tensor c) {
+    CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+    CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+    CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+    const int M = a.size(0);
+    const int K = a.size(1);
+    const int N = b.size(1);
+    CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+    CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+    CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+    constexpr int WMMA_M = 16;
+    constexpr int WMMA_N = 16;
+    constexpr int WMMA_K = 16;
+
+    dim3 block(WARP_SIZE);
+    dim3 grid(div_ceil(N, WMMA_N), div_ceil(M, WMMA_M));
+
+     hgemm_wmma_m16n16k16_naive_kernel<WMMA_M, WMMA_N, WMMA_K>
+      <<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                        reinterpret_cast<half *>(b.data_ptr()),
+                        reinterpret_cast<half *>(c.data_ptr()), M, N, K);
+}
+
+void hgemm_wmma_m16n16k16_mma4x2(torch::Tensor a, torch::Tensor b,
+                                 torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int WMMA_M = 16;
+  constexpr int WMMA_N = 16;
+  constexpr int WMMA_K = 16;
+  constexpr int WMMA_TILE_M = 4;
+  constexpr int WMMA_TILE_N = 2;
+  constexpr int NUM_THREADS =
+      (WMMA_TILE_M * WMMA_TILE_N * WARP_SIZE); // 4 * 2 * 32 = 256
+
+  dim3 block(NUM_THREADS);
+  dim3 grid(div_ceil(N, WMMA_N * WMMA_TILE_N),
+            div_ceil(M, WMMA_M * WMMA_TILE_M));
+
+  hgemm_wmma_m16n16k16_mma4x2_kernel<WMMA_M, WMMA_N, WMMA_K, WMMA_TILE_M,
+                                     WMMA_TILE_N>
+      <<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                        reinterpret_cast<half *>(b.data_ptr()),
+                        reinterpret_cast<half *>(c.data_ptr()), M, N, K);
+}
+
+void hgemm_wmma_m16n16k16_mma4x2_warp2x4(torch::Tensor a, torch::Tensor b,
+                                         torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int WMMA_M = 16;
+  constexpr int WMMA_N = 16;
+  constexpr int WMMA_K = 16;
+  constexpr int WMMA_TILE_M = 4;
+  constexpr int WMMA_TILE_N = 2;
+  constexpr int WARP_TILE_M = 2;
+  constexpr int WARP_TILE_N = 4;
+  constexpr int NUM_THREADS =
+      (WMMA_TILE_M * WMMA_TILE_N * WARP_SIZE); // 4 * 2 * 32 = 256
+
+  dim3 block(NUM_THREADS);
+  dim3 grid(div_ceil(N, WMMA_N * WMMA_TILE_N * WARP_TILE_N),
+            div_ceil(M, WMMA_M * WMMA_TILE_M * WARP_TILE_M));
+
+  hgemm_wmma_m16n16k16_mma4x2_warp2x4_kernel<WMMA_M, WMMA_N, WMMA_K,
+                                             WMMA_TILE_M, WMMA_TILE_N,
+                                             WARP_TILE_M, WARP_TILE_N>
+      <<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                        reinterpret_cast<half *>(b.data_ptr()),
+                        reinterpret_cast<half *>(c.data_ptr()), M, N, K);
+}
+
+// double buffer, padding
+void hgemm_wmma_m16n16k16_mma4x2_warp2x4_dbuf_async(torch::Tensor a,
+                                                    torch::Tensor b,
+                                                    torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int WMMA_M = 16;
+  constexpr int WMMA_N = 16;
+  constexpr int WMMA_K = 16;
+  constexpr int WMMA_TILE_M = 4;
+  constexpr int WMMA_TILE_N = 2;
+  constexpr int WARP_TILE_M = 2;
+  constexpr int WARP_TILE_N = 4;
+  constexpr int NUM_THREADS =
+      (WMMA_TILE_M * WMMA_TILE_N * WARP_SIZE); // 4 * 2 * 32 = 256
+
+  dim3 block(NUM_THREADS);
+  dim3 grid(div_ceil(N, WMMA_N * WMMA_TILE_N * WARP_TILE_N),
+            div_ceil(M, WMMA_M * WMMA_TILE_M * WARP_TILE_M));
+
+  hgemm_wmma_m16n16k16_mma4x2_warp2x4_dbuf_async_kernel<
+      WMMA_M, WMMA_N, WMMA_K, WMMA_TILE_M, WMMA_TILE_N, WARP_TILE_M,
+      WARP_TILE_N, 8><<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                                       reinterpret_cast<half *>(b.data_ptr()),
+                                       reinterpret_cast<half *>(c.data_ptr()),
+                                       M, N, K);
+}
+
+// m32n8k16
+void hgemm_wmma_m32n8k16_mma2x4_warp2x4_dbuf_async(torch::Tensor a,
+                                                   torch::Tensor b,
+                                                   torch::Tensor c) {
+  CHECK_TORCH_TENSOR_DTYPE(a, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(b, torch::kHalf)
+  CHECK_TORCH_TENSOR_DTYPE(c, torch::kHalf)
+  const int M = a.size(0);
+  const int K = a.size(1);
+  const int N = b.size(1);
+  CHECK_TORCH_TENSOR_SHAPE(a, M, K)
+  CHECK_TORCH_TENSOR_SHAPE(b, K, N)
+  CHECK_TORCH_TENSOR_SHAPE(c, M, N)
+  constexpr int WMMA_M = 32;
+  constexpr int WMMA_N = 8;
+  constexpr int WMMA_K = 16;
+  constexpr int WMMA_TILE_M = 2;
+  constexpr int WMMA_TILE_N = 4;
+  constexpr int WARP_TILE_M = 2;
+  constexpr int WARP_TILE_N = 4;
+  constexpr int NUM_THREADS =
+      (WMMA_TILE_M * WMMA_TILE_N * WARP_SIZE); // 2 * 4 * 32 = 256
+
+  dim3 block(NUM_THREADS);
+  dim3 grid(div_ceil(N, WMMA_N * WMMA_TILE_N * WARP_TILE_N),
+            div_ceil(M, WMMA_M * WMMA_TILE_M * WARP_TILE_M));
+
+  hgemm_wmma_m32n8k16_mma2x4_warp2x4_dbuf_async_kernel<
+      WMMA_M, WMMA_N, WMMA_K, WMMA_TILE_M, WMMA_TILE_N, WARP_TILE_M,
+      WARP_TILE_N, 8><<<grid, block>>>(reinterpret_cast<half *>(a.data_ptr()),
+                                       reinterpret_cast<half *>(b.data_ptr()),
+                                       reinterpret_cast<half *>(c.data_ptr()),
+                                       M, N, K);
+}
