@@ -92,4 +92,126 @@ __global__ void __launch_bounds__(256)
             wmma::fill_fragment(C_frag[i][j], 0.0);
         }
     }
+
+    // stage 0 load (the prefill)
+    // convert shared memory pointers to generic addresses for cp.async
+    uint32_t smem_a_base_ptr = __cvta_generic_to_shared(s_a);
+    uint32_t smem_b_base_ptr = __cvta_generic_to_shared(s_b);
+
+#pragma unroll
+    for (int k=0; k < (K_STAGE - 1); k++) { // 0,1
+        int load_gmem_a_k = k * WMMA_K + load_smem_a_k;     // global col of a
+        int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+        int load_gmem_b_k = k * WMMA_K + load_smem_b_k;     // global row of b
+        int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+
+        uint32_t load_smem_a_ptr =
+            (smem_a_base_ptr + 
+                (k * s_a_stage_offset + load_smem_a_m * (BK + A_PAD) + load_smem_a_k) *
+                        sizeof(half));
+        CP_ASYNC_CG(load_smem_a_ptr, &A[load_gmem_a_addr], 16);
+
+        uint32_t load_smem_b_ptr = 
+            (smem_b_base_ptr + 
+                (k + s_b_stage_offset + load_smem_b_k * (BN + B_PAD) + load_smem_b_n) * 
+                        sizeof(half));
+        CP_ASYNC_CG(load_smem_b_ptr, &B[load_gmem_b_addr], 16);
+
+        CP_ASYNC_COMMIT_GROUP();
+    }
+    CP_ASYNC_WAIT_GROUP(K_STAGE - 2);   //stag2->0,stage3->1,stage4->2
+    __syncthreads();
+
+    // main pipeline
+#pragma unroll
+    for (int k = (K_STAGE - 1); k<NUM_K_TILES; k++) {
+        // identify which stage stats to use
+        int smem_sel = (k - 1) % K_STAGE;
+        int smem_sel_next = k % K_STAGE;
+
+        int load_gmem_a_k = k * WMMA_K + load_smem_a_k;
+        int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+        int load_gmem_b_k = k * WMMA_K + load_smem_b_k;
+        int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+
+        uint32_t load_smem_a_ptr = 
+            (smem_a_base_ptr + (smem_sel_next * s_a_stage_offset + load_smem_a_m * (BK + A_PAD) + load_smem_a_k) * sizeof(half));
+        CP_ASYNC_CG(load_smem_a_ptr, &A[load_gmem_a_addr], 16);
+
+        uint32_t load_smem_b_ptr = 
+            (smem_b_base_ptr + (smem_sel_next * s_b_stage_offset + load_smem_b_k * (BN + B_PAD) + load_smem_b_n) * sizeof(half));
+        CP_ASYNC_CG(load_smem_b_ptr, &B[load_gmem_b_addr], 16);
+        CP_ASYNC_COMMIT_GROUP();
+
+        // define fragments for A,B
+        wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>A_frag[WARP_TILE_M];
+        wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>B_frag[WARP_TILE_N];
+
+        // compute stage 0
+    #pragma unroll
+        for (int i=0; i<WARP_TILE_M; i++) {
+            const int warp_smem_a_m = warp_m * (WMMA_M * WARP_TILE_M) + i * WMMA_M;
+            wmma::load_matrix_sync(A_frag[i], &s_a[smem_sel][warp_smem_a_m][0], BK + A_PAD);
+        }
+    #pragma unroll
+        for (int j=0; j<WARP_TILE_N; j++) {
+            const int warp_smem_b_n = warp_n * (WMMA_N * WARP_TILE_N) + j * WMMA_N;
+            wmma::load_matrix_sync(B_frag[j], &s_b[smem_sel][0][warp_smem_b_n], BN + B_PAD);
+        }
+
+    #pragma unroll
+        for (int i=0; i<WARP_TILE_M; i++) {
+    #pragma unroll
+            for (int j=0; j<WARP_TILE_N; j++) {
+                wmma::mma_sync(C_frag[i][j], A_frag[i], B_frag[j], C_frag[i][j]);
+            }
+        }
+        CP_ASYNC_WAIT_GROUP(0);
+        __syncthreads();
+    }
+    // make sure all memory issues ready
+    if ((K_STAGE - 2) > 0) {
+        CP_ASYNC_WAIT_GROUP(0);
+        __syncthreads();
+    }
+
+    // processing last (K_STAGE - 1) tile iters
+    {
+    #pragma unroll
+        for (int k=0; k<(K_STAGE - 1); k++) {
+            const int stage_sel = ((NUM_K_TILES - (K_STAGE - 1) + k) % K_STAGE);
+            wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>A_frag[WARP_TILE_M];
+            wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>B_frag[WARP_TILE_N];
+
+        #pragma unroll
+            for (int i=0; i<WARP_TILE_M; i++) {
+                const int warp_smem_a_m = warp_m * (WMMA_M * WARP_TILE_M) + i * WMMA_M;
+                wmma::load_matrix_sync(A_frag[i], &s_a[stage_sel][warp_smem_a_m][0], BK + A_PAD);
+            }
+        #pragma unroll
+            for (int j=0; j<WARP_TILE_N; j++) {
+                const int warp_smem_b_n = warp_n * (WMMA_N * WARP_TILE_N) + j * WMMA_N;
+                wmma::load_matrix_sync(B_frag[j], &s_b[stage_sel][0][warp_smem_b_n], BN + B_PAD);
+            }
+        
+        #pragma unroll
+            for (int i=0; i<WARP_TILE_M; i++) {
+        #pragma unroll
+                for (int j=0; j<WARP_TILE_N; j++) {
+                    wmma::mma_sync(C_frag[i][j], A_frag[i], B_frag[j], C_frag[i][j]);
+                }
+            }
+        }
+    }
+
+    // store back to c
+#pragma unroll
+    for (int i=0; i<WARP_TILE_M; i++) {
+#pragma unroll
+        for (int j=0; j<WARP_TILE_N; j++) {
+            const int store_gmem_c_m = by * BM + warp_m * (WMMA_M * WARP_TILE_M) + i * WMMA_M;
+            const int store_gmem_c_n = bx * BN + warp_n * (WMMA_N * WARP_TILE_N) + j * WMMA_N;
+            wmma::store_matrix_sync(C + store_gmem_c_m * N + store_gmem_c_n, C_frag[i][j], N, wmma::mem_row_major)
+        }
+    }
 }
