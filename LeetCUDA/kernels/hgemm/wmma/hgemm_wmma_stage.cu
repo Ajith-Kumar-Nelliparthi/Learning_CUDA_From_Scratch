@@ -634,4 +634,114 @@ __global__ void __launch_bounds__(256)
     __syncthreads();
 
     // main loop
+    for (int k = (K_STAGE - 1); k < NUM_K_TILES; k++) {
+        int smem_sel = (k + 1) % K_STAGE;
+        int smem_sel_next = k % K_STAGE;
+
+        int load_gmem_a_k = k * (WMMA_K * WARP_TILE_K) + load_smem_a_k;
+        int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+        int load_gmem_b_k = k * (WMMA_K * WARP_TILE_K) + load_smem_b_k;
+        int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+
+        uint32_t load_smem_a_ptr = 
+            (smem_a_base_ptr + (smem_sel_next * s_a_stage_offset + load_smem_a_m * (BK + A_PAD) + load_smem_a_k) * sizeof(half));
+        uint32_t load_smem_b_ptr = 
+            (smem_b_base_ptr + (smem_sel_next * s_b_stage_offset + load_smem_b_k * (BN + B_PAD) + load_smem_b_n) * sizeof(half));
+        
+        CP_ASYNC_CG(load_smem_a_ptr, &A[load_gmem_a_addr], 16);
+        CP_ASYNC_CG(load_smem_a_ptr + 16, &A[load_gmem_a_addr + 8], 16);
+        CP_ASYNC_CG(load_smem_b_ptr, &B[load_gmem_b_addr], 16);
+
+        CP_ASYNC_COMMIT_GROUP();
+
+    #pragma unroll
+        for (int warp_k = 0; warp_k< WARP_TILE_K; warp_k++) {
+            wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>A_frag[WARP_TILE_M];
+            wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>B_frag[WARP_TILE_N];
+            const int warp_smem_k = warp_k * WMMA_K;
+
+        #pragma unroll
+            for (int i=0; i < WARP_TILE_M; i++) {
+                int warp_smem_a_m = warp_m * (WMMA_M * WARP_TILE_M) + i * WMMA_M;
+                half *load_smem_a_frag_ptr = (s_a + smem_sel * s_a_stage_offset + warp_smem_a_m * (BK + A_PAD) + warp_smem_k);
+                wmma::load_matrix_sync(A_frag[i], load_smem_a_frag_ptr, BK + A_PAD);
+            }
+        #pragma unroll
+            for (int j=0; j<WARP_TILE_N; j++) {
+                int warp_smem_b_n = warp_n * (WMMA_N * WARP_TILE_N) + j * WMMA_N;
+                half *load_smem_b_frag_ptr = (s_b + smem_sel * s_b_stage_offset + warp_smem_k * (BN + B_PAD) + warp_smem_b_n);
+                wmma::load_matrix_sync(B_frag[j], load_smem_b_frag_ptr, BN + B_PAD);
+            }
+
+        #pragma unroll
+            for (int i=0; i < WARP_TILE_M; i++) {
+        #pragma unroll
+                for (int j=0; j< WARP_TILE_N; j++) {
+                    wmma::mma_sync(C_frag[i][j], A_frag[i], B_frag[j], C_frag[i][j]);
+                }
+            }
+        }
+        CP_ASYNC_COMMIT_GROUP(K_STAGE - 2);
+        __syncthreads();
+    }
+    if ((K_STAGE - 2) > 0) {
+        CP_ASYNC_WAIT_GROUP(0);
+        __syncthreads();
+    }
+
+    // process last k tile
+      {
+#pragma unroll
+    for (int k = 0; k < (K_STAGE - 1); k++) {
+      const int stage_sel = ((NUM_K_TILES - (K_STAGE - 1) + k) % K_STAGE);
+
+#pragma unroll
+      for (int warp_k = 0; warp_k < WARP_TILE_K; ++warp_k) {
+        wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>A_frag[WARP_TILE_M];
+        wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half,wmma::row_major>B_frag[WARP_TILE_N];
+        const int warp_smem_k = warp_k * WMMA_K;
+
+// compute stage 0
+#pragma unroll
+        for (int i = 0; i < WARP_TILE_M; ++i) {
+          // load 2 tiles -> reg, smem a -> frags a, warp_m 0~3
+          int warp_smem_a_m = warp_m * (WMMA_M * WARP_TILE_M) + i * WMMA_M;
+          half *load_smem_a_frag_ptr =
+              (s_a + stage_sel * s_a_stage_offset + warp_smem_a_m * (BK + A_PAD) + warp_smem_k);
+          wmma::load_matrix_sync(A_frag[i], load_smem_a_frag_ptr, BK + A_PAD);
+        }
+
+#pragma unroll
+        for (int j = 0; j < WARP_TILE_N; ++j) {
+          // load 4 tiles -> reg, smem b -> frags b, warp_n 0~2
+          int warp_smem_b_n = warp_n * (WMMA_N * WARP_TILE_N) + j * WMMA_N;
+          half *load_smem_b_frag_ptr =
+              (s_b + stage_sel * s_b_stage_offset + warp_smem_k * (BN + B_PAD) + warp_smem_b_n);
+          wmma::load_matrix_sync(B_frag[j], load_smem_b_frag_ptr, BN + B_PAD);
+        }
+
+#pragma unroll
+        for (int i = 0; i < WARP_TILE_M; ++i) {
+#pragma unroll
+          for (int j = 0; j < WARP_TILE_N; ++j) {
+            wmma::mma_sync(C_frag[i][j], A_frag[i], B_frag[j], C_frag[i][j]);
+          }
+        }
+      }
+    }
+  }
+
+// finally, store back to C matrix.
+#pragma unroll
+  for (int i = 0; i < WARP_TILE_M; ++i) {
+#pragma unroll
+    for (int j = 0; j < WARP_TILE_N; ++j) {
+      const int store_gmem_a_m =
+          by * BM + warp_m * (WMMA_M * WARP_TILE_M) + i * WMMA_M;
+      const int store_gmem_a_n =
+          bx * BN + warp_n * (WMMA_N * WARP_TILE_N) + j * WMMA_N;
+      wmma::store_matrix_sync(C + store_gmem_a_m * N + store_gmem_a_n,
+                              C_frag[i][j], N, wmma::mem_row_major);
+    }
+  }
 }
