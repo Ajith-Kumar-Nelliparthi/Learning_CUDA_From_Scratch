@@ -1,4 +1,4 @@
-// CUDA, half-precision, WMMA, and PyTorch extension headers.
+// load header files
 #include <stdio.h>
 #include <stdlib.h>
 #include <cuda_runtime.h>
