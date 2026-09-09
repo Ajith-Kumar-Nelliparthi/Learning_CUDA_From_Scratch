@@ -139,3 +139,106 @@ __global__ void hgemm_mma_m16n8k16_naive_kernel(half *A, half *B, half *C, int M
         LDST128BITS(C[store_gmem_c_Addr]) = LDST128BITS(s_c[lane_id][0]);
     }
 }
+
+// 128x128
+template <const int MMA_M = 16, const int MMA_N = 8, const int MMA_K = 16,
+            const int MMA_TILE_M = 2, const int MMA_TILE_N = 4,
+            const int WARP_TILE_M = 4, const int WARP_TILE_N = 4,
+            const int A_PAD = 0, const int B_PAD = 0>
+__global__ void hgemm_mma_m16n8k16_mma2x4_warp4x4_kernel(half *A, half *B, half *C, int M, int N, int K) {
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
+    const int NUM_K_TILES = div_ceil(K, MMA_K);
+    constexpr int BM = MMA_M * MMA_TILE_M * WARP_TILE_M;    //16x2x4 = 128
+    constexpr int BN = MMA_N * MMA_TILE_N ?* WARP_TILE_N;   //8x4x4 = 128
+    constexpr int BK = MMA_K;
+
+    __shared__ half s_a[BM][BK + A_PAD];
+    __shared__ half s_b[BK][BN + B_PAD];
+
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    const int warp_id = tid / WARP_SIZE;
+    const int lane_id = tid % WARP_SIZE;
+    const int warp_m = warp_id % 2;     //2 warps in M dir (0,1)
+    const int warp_n = warp_id / 2;     //4 warps in N dir (0,1,2,3)
+
+    int load_smem_a_m = tid / 2;
+    int load_smem_a_k = (tid % 2 == 0) ? 0 : 8;
+    int load_smem_b_k = tid / 16;
+    int load_smem_b_n = (tid % 16) * 8;
+
+    int load_gmem_a_m = by * BM + load_smem_a_m;
+    int load_gmem_b_n = bx * BN + load_smem_b_n;
+    if (load_gmem_a_m >= M || load_gmem_b_n >= N) return;
+
+    uint32_t RC[WARP_TILE_M][WARP_TILE_N][2];
+#pragma unroll
+    for (int i = 0; i < WARP_TILE_M; i++) {
+    #pragma unroll
+        for (int j = 0; j < WARP_TILE_N; j++) {
+            RC[i][j][0] = 0;
+            RC[i][j][1] = 0;
+        }
+    }
+
+#pragma unroll
+    for (int k = 0; k < NUM_K_TILES; k++) {
+        int load_gmem_a_k = k * MMA_K + load_smem_a_k;
+        int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+        int load_gmem_b_k = k * MMA_K + load_smem_b_k;
+        int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+        LDST128BITS(s_a[load_smem_a_m][load_smem_a_k]) = (LDST128BITS(A[load_gmem_a_addr]));
+        LDST128BITS(s_b[load_smem_b_k][load_smem_b_n]) = (LDST128BITS(B[load_gmem_b_addr]));
+        __syncthreads();
+
+        // ld.matrix for s_a, ld.mat trans for s_b
+        uint32_t RA[WARP_TILE_M][4];
+        uint32_t RB[WARP_TILE_N][2];
+
+        // smem -> reg
+    #pragma unroll
+        for (int i = 0; i < WARP_TILE_M; i++) {
+            int warp_smem_a_m = warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M;
+            int lane_smem_a_m = warp_smem_a_m + lane_id % 16;   //0-15
+            int lane_smem_a_k = (lane_id / 16) * 8; //0,8
+            uint32_t load_smem_a_ptr = __cvta_generic_to_shared(&s_a[load_smem_a_m][load_smem_a_k]);
+            LDMATRIX_X4(RA[i][0], RA[i][1], RA[i][2], RA[i][3], lane_smem_a_ptr);
+        }
+
+    #pragma unroll
+        for (int j = 0; j < WARP_TILE_N; j++) {
+            int warp_smem_b_n = warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N;
+            int lane_smem_b_k = lane_id % 16;
+            int lane_smem_b_n = warp_smem_b_n;
+            uint32_t load_smem_b_ptr = __cvta_generic_to_shared(&s_b[load_smem_b_k][load_smem_b_n]);
+             LDMATRIX_X2_T(RB[j][0], RB[j][1], lane_smem_b_ptr);
+        }
+
+    #pragma unroll
+        for (int i = 0; i < WARP_TILE_M; i++) {
+    #pragma unroll
+            for (int j = 0; j < WARP_TILE_N; j++) {
+                HMMA16816(RC[i][j][0], RC[i][j][1], RA[i][0], RA[i][1], RA[i][2],
+                  RA[i][3], RB[j][0], RB[j][1], RC[i][j][0], RC[i][j][1]);
+            }
+        }
+        __syncthreads();
+    }
+    // store result
+#pragma unroll
+  for (int i = 0; i < WARP_TILE_M; ++i) {
+#pragma unroll
+    for (int j = 0; j < WARP_TILE_N; ++j) {
+      int store_warp_smem_c_m = warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M;
+      int store_warp_smem_c_n = warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N;
+
+      int store_lane_gmem_c_m = by * BM + store_warp_smem_c_m + lane_id / 4;
+      int store_lane_gmem_c_n = bx * BN + store_warp_smem_c_n + (lane_id % 4) * 2;
+      int store_gmem_c_addr_0 = store_lane_gmem_c_m * N + store_lane_gmem_c_n;
+      int store_gmem_c_addr_1 = (store_lane_gmem_c_m + 8) * N + store_lane_gmem_c_n;
+
+      LDST32BITS(C[store_gmem_c_addr_0]) = LDST32BITS(RC[i][j][0]);
+      LDST32BITS(C[store_gmem_c_addr_1]) = LDST32BITS(RC[i][j][1]);
+    }
+  }
+}
