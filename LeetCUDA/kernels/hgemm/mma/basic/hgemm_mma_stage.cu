@@ -122,7 +122,7 @@ template <const int MMA_M = 16, const int MMA_N = 8, const int MMA_K = 16,
           bool BLOCK_SWIZZLE = false>
 __global__ void __launch_bounds__(256)
     hgemm_mma_m16n8k16_mma2x4_warp4x4_stages_kernel(half *A, half *B, half *C, int M, int N, int K) {
-  const int bx = ((int)BLOCK_SWIZZLE) * blockDim.z * gridDim.x + blockIdx.x;
+  const int bx = ((int)BLOCK_SWIZZLE) * blockIdx.z * gridDim.x + blockIdx.x;
   const int by = blockIdx.y;
   const int NUM_K_TILES = div_ceil(K, MMA_K);
   constexpr int BM = MMA_M * MMA_TILE_M * WARP_TILE_M;  //16x2x4=128
@@ -289,4 +289,91 @@ __global__ void __launch_bounds__(256)
       LDST32BITS(C[store_gmem_c_addr_1]) = LDST32BITS(RC[i][j][1]);
     }
   }
+}
+
+template <const int MMA_M = 16, const int MMA_N = 8, const int MMA_K = 16,
+          const int MMA_TILE_M = 2, const int MMA_TILE_N = 4,
+          const int WARP_TILE_M = 4, const int WARP_TILE_N = 4,
+          const int A_PAD = 0, const int B_PAD = 0, const int K_STAGE = 2,
+          bool BLOCK_SWIZZLE = false>
+__global__ void __launch_bounds__(256) hgemm_mma_m16n8k16_mma2x4_warp4x4_stages_dsmem_kernel(half *A, half *B, half *C, int M, int N, int K) {
+    const int by = blockIdx.y;
+    const int bx = ((int)BLOCK_SWIZZLE) * blockIdx.z * gridDim.x + blockIdx.x;
+    const int NUM_K_TILES = div_ceil(K, MMA_K);
+    constexpr int BM = MMA_M * MMA_TILE_M * WARP_TILE_M;
+    constexpr int BN = MMA_N * MMA_TILE_N * WARP_TILE_N;
+    constexpr int BK = MMA_K;
+
+    extern __shared__ half smem[];
+    half *s_a = smem;
+    half *s_b = smem + K_STAGE * BM * (BK + A_PAD);
+    constexpr int s_a_stage_offset = BM * (BK + A_PAD);
+    constexpr int s_b_stage_offset = BK * (BN + B_PAD);
+
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    const int warp_id = tid / WARP_SIZE;
+    const int lane_id = tid % WARP_SIZE;
+    const int warp_m = warp_id % 2;
+    const int warp_n = warp_id / 2;
+
+    int load_smem_a_m = tid / 2;
+    int load_smem_a_k = (tid % 2 == 0) ? 0 : 8;
+    int load_smem_b_k = tid / 16;
+    int load_smem_b_n = (tid % 16) * 8;
+    int load_gmem_a_m = by * BM + load_smem_a_m;
+    int load_gmem_b_n = bx * BN + load_smem_b_n;
+    if (load_gmem_a_m >= M || load_gmem_b_n >= N) return;
+
+    uint32_t RC[WARP_TILE_M][WARP_TILE_N][2];
+  #pragma unroll
+    for (int i = 0; i < WARP_TILE_M; i++) {
+    #pragma unroll
+      for (int j = 0; j < WARP_TILE_N; j++) {
+        RC[i][j][0] = 0;
+        RC[i][j][1] = 0;
+      }
+    }
+
+    uint32_t smem_a_base_ptr = __cvta_generic_to_shared(s_a);
+    uint32_t smem_b_base_ptr = __cvta_generic_to_shared(s_b);
+
+    // prefill
+    for (int k = 0; k < (K_STAGE - 1); k++) {
+      int load_gmem_a_k = k * MMA_K + load_smem_a_k;
+      int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+      int load_gmem_b_k = k * MMA_K + load_smem_b_k;
+      int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+
+      uint32_t load_smem_a_ptr = (smem_a_base_ptr + (k * s_a_stage_offset + load_smem_a_m * (BK + A_PAD) + load_smem_a_k) * sizeof(half));
+      CP_ASYNC_CG(load_smem_a_ptr, &A[load_gmem_a_addr], 16);
+      uint32_t load_smem_b_ptr = (smem_b_base_ptr + (k * s_b_stage_offset + load_smem_b_k * (BN + B_PAD) + load_smem_b_n) * sizeof(half));
+      CP_ASYNC_CG(load_smem_b_ptr, &B[load_gmem_b_addr], 16);
+
+      CP_ASYNC_COMMIT_GROUP();
+    }
+    CP_ASYNC_WAIT_GROUP(K_STAGE - 2);
+    __syncthreads();
+
+    // main loop
+  #pragma unroll
+    for (int k = (K_STAGE - 1); k < NUM_K_TILES; k++) {
+      int smem_sel = (k + 1) % K_STAGE;
+      int smem_sel_next = k % K_STAGE;
+
+      int load_gmem_a_k = k * MMA_K + load_smem_a_k;
+      int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+      int load_gmem_b_k = k * MMA_K + load_smem_b_k;
+      int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+
+      uint32_t load_smem_a_ptr = (smem_a_base_ptr + 
+        (smem_sel_next * s_a_stage_offset + load_smem_a_m * (BK + A_PAD) + load_smem_a_k) * sizeof(half));
+      CP_ASYNC_CG(load_smem_a_ptr, &A[load_gmem_a_addr], 16);
+      uint32_t load_smem_b_ptr = (smem_b_base_ptr + 
+        (smem_sel_next * s_b_stage_offset + load_smem_b_k * (BN + B_PAD) + load_smem_b_n) * sizeof(half));
+      CP_ASYNC_CG(load_smem_b_ptr, &B[load_gmem_b_addr], 16);
+
+      CP_ASYNC_COMMIT_GROUP();
+      uint32_t RA[WARP_TILE_M][4];
+      uint32_t RB[WARP_TILE_N][2];
+    }
 }
