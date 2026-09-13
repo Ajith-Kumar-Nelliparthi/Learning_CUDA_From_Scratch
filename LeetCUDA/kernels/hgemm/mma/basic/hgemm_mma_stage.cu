@@ -242,7 +242,7 @@ __global__ void __launch_bounds__(256)
   {
   #pragma unroll
     for (int k = 0; k < (K_STAGE - 1); k++) {
-      int stage_sel = ((NUM_K_TILES - (K_STAGE - 1) + k) % K_STAGE)
+      int stage_sel = ((NUM_K_TILES - (K_STAGE - 1) + k) % K_STAGE);
       uint32_t RA[WARP_TILE_M][4];
       uint32_t RB[WARP_TILE_N][2];
 
@@ -375,5 +375,92 @@ __global__ void __launch_bounds__(256) hgemm_mma_m16n8k16_mma2x4_warp4x4_stages_
       CP_ASYNC_COMMIT_GROUP();
       uint32_t RA[WARP_TILE_M][4];
       uint32_t RB[WARP_TILE_N][2];
+
+    #pragma unroll
+        for (int i = 0; i < WARP_TILE_M; i++) {
+          int warp_smem_a_m = warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M;
+          int lane_smem_a_m = warp_smem_a_m + lane_id % 16;
+          int lane_smem_a_k = (lane_id / 16) * 8;
+          uint32_t lane_smem_a_ptr = (smem_a_base_ptr + 
+            (smem_sel * s_a_stage_offset + lane_smem_a_m * (BK + A_PAD) + lane_smem_a_k) * sizeof(half));
+          LDMATRIX_X4(RA[i][0], RA[i][1], RA[i][2], RA[i][3], lane_smem_a_ptr);
+        }
+
+    #pragma unroll
+        for (int j = 0; j < WARP_TILE_N; j++) {
+          int warp_smem_b_n = warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N;
+          int lane_smem_b_k = lane_id % 16;
+          int lane_smem_b_n = warp_smem_b_n;
+          uint32_t lane_smem_b_ptr = (smem_b_base_ptr + 
+            (smem_sel * s_b_stage_offset + lane_smem_b_k * (BN + B_PAD) + lane_smem_b_n) * sizeof(half));
+          LDMATRIX_X2_T(RB[j][0], RB[j][1], lane_smem_b_ptr);
+        }
+
+      #pragma unroll
+        for (int i = 0; i < WARP_TILE_M; i++) {
+        #pragma unroll
+          for (int j = 0; j < WARP_TILE_N; j++) {
+            HMMA16816(RC[i][j][0], RC[i][j][1], RA[i][0], RA[i][1], RA[i][2],
+                  RA[i][3], RB[j][0], RB[j][1], RC[i][j][0], RC[i][j][1]);
+          }
+        }
+        CP_ASYNC_WAIT_GROUP(K_STAGE - 2);
+        __syncthreads();
+    }
+    if constexpr ((K_STAGE - 2) > 0) {
+      CP_ASYNC_WAIT_GROUP(0);
+      __syncthreads();
+    }
+
+    // process last k tile
+  #pragma unroll
+    for (int k = 0; k < (K_STAGE - 1); k++) {
+      int stage_Sel = ((NUM_K_TILES - (K_STAGE - 1) + k) % K_STAGE);
+      uint32_t RA[WARP_TILE_M][4];
+      uint32_t RB[WARP_TILE_N][2];
+
+    #pragma unroll
+      for (int i = 0; i < WARP_TILE_M; i++) {
+          int warp_smem_a_m = warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M;
+          int lane_smem_a_m = warp_smem_a_m + lane_id % 16;
+          int lane_smem_a_k = (lane_id / 16) * 8;
+          uint32_t lane_smem_a_ptr = (smem_a_base_ptr + 
+            (smem_sel * s_a_stage_offset + lane_smem_a_m * (BK + A_PAD) + lane_smem_a_k) * sizeof(half));
+          LDMATRIX_X4(RA[i][0], RA[i][1], RA[i][2], RA[i][3], lane_smem_a_ptr);
+      }
+    #pragma unroll
+      for (int j = 0; j < WARP_TILE_N; j++) {
+          int warp_smem_b_n = warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N;
+          int lane_smem_b_k = lane_id % 16;
+          int lane_smem_b_n = warp_smem_b_n;
+          uint32_t lane_smem_b_ptr = (smem_b_base_ptr + 
+            (smem_sel * s_b_stage_offset + lane_smem_b_k * (BN + B_PAD) + lane_smem_b_n) * sizeof(half));
+          LDMATRIX_X2_T(RB[j][0], RB[j][1], lane_smem_b_ptr);
+      }
+    
+    #pragma unroll
+      for (int i = 0; i < WARP_TILE_M; i++) {
+      #pragma unroll
+        for (int j = 0; j < WARP_TILE_N; j++) {
+            HMMA16816(RC[i][j][0], RC[i][j][1], RA[i][0], RA[i][1], RA[i][2],
+                    RA[i][3], RB[j][0], RB[j][1], RC[i][j][0], RC[i][j][1]);
+        }
+      }
+    }
+
+    // store results
+  #pragma unroll
+    for (int i = 0; i < WARP_TILE_M; i++) {
+    #pragma unroll
+      for (int j = 0; j < WARP_TILE_N; j++) {
+        int store_warp_smem_c_m = warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M;
+        int store_warp_smem_c_n = warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N;
+        int store_lane_gmem_c_m = by * BM + store_warp_smem_c_m + lane_id / 4;
+        int store_lane_gmem_c_n = bx * BN + store_warp_smem_c_n + (lane_id % 4) * 2;
+        int store_gmem_c_addr_0 = store_lane_gmem_c_m * N + store_lane_gmem_c_n;
+        int store_gmem_c_addr_1 = (store_lane_gmem_c_m + 8) * N + store_lane_gmem_c_n;
+        LDST32BITS(C[store_gmem_c_addr_0]) = LDST32BITS(RC[i][j][0]);
+        LDST32BITS(C[store_gmem_c_addr_1]) = LDST32BITS(RC[i][j][1]);
+      }
     }
 }
