@@ -571,4 +571,118 @@ __global__ void __launch_bounds__(256)
                     lane_smem_b_ptr);
     }
   }
+
+#pragma unroll
+  for (int k = (K_STAGE - 1); k <NUM_K_TILES; k++) {
+    reg_store_idx ^= 1;   //0->1
+    reg_load_idx ^= 1;    //1->0
+    int smem_sel = (k + 1) % K_STAGE;
+    int smem_sel_next = k % K_STAGE;
+
+    int load_gmem_a_k = k * MMA_K + load_smem_a_k;
+    int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+    int load_gmem_b_k = k * MMA_K + load_smem_b_k;
+    int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+
+    uint32_t load_smem_a_ptr = (smem_a_base_ptr + 
+        (smem_sel_next * s_a_stage_offset + load_smem_a_m * (BK + A_PAD) + load_smem_a_k) * sizeof(half));
+    CP_ASYNC_CG(load_smem_a_ptr, &A[load_gmem_a_addr], 16);   //MMA_K 0 
+    uint32_t load_smem_a_mma_k_ptr = (smem_a_base_ptr + s_a_mma_k_store_offset * sizeof(half) +
+        (smem_sel_next * s_a_stage_offset + load_smem_a_m * (BK + A_PAD) + load_smem_a_k) * sizeof(half));
+    CP_ASYNC_CG(load_smem_a_mma_k_ptr, &A[load_gmem_a_addr + 16], 16);  //MMA_K 1
+    uint32_t load_smem_b_ptr = (smem_b_base_ptr + 
+        (smem_sel_next * s_b_stage_offset + load_smem_b_k * (BN + B_PAD) + load_smem_b_n) * sizeof(half));
+    CP_ASYNC_CG(load_smem_b_ptr, &B[load_gmem_b_addr], 16);
+
+    int load_gmem_b_k_mma_k = k * BK * WARP_TILE_K + MMA_K + load_smem_b_k;
+    int load_gmem_b_addr_mma_k = load_gmem_b_k_mma_k * N + load_gmem_b_n;
+    uint32_t load_smem_b_mma_k_ptr = (smem_b_base_ptr + s_b_mma_k_store_offset * sizeof(half) + 
+        (smem_sel_next * s_b_stage_offset + load_smem_b_k * (BN + B_PAD) + load_smem_b_n) * sizeof(half));
+    CP_ASYNC_CG(load_smem_b_mma_k_ptr, &A[load_gmem_b_addr_mma_k], 16);
+    CP_ASYNC_COMMIT_GROUP();
+
+    // ldmatrix for s_a, ldmatrix.trans for s_b
+    // smem -> reg buffers 1, sedond MMA_K 16-31
+  #pragma unroll
+    for (int i = 0; i < WARP_TILE_M; i++) {
+      int warp_smem_a_m = warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M;
+      int lane_smem_a_m = warp_smem_a_m + lane_id % 16; //0-15
+      int lane_smem_a_k = (lane_id / 16) * 8; //0,8
+      uint32_t lane_smem_a_ptr = (smem_a_base_ptr + s_a_mma_k_store_offset * sizeof(half) +
+          (smem_sel * s_a_stage_offset + load_smem_a_m * (BK + A_PAD) * load_smem_a_k) * sizeof(half));
+      LDMATRIX_X4(RA[reg_store_idx][i][0], RA[reg_store_idx][i][1],
+                  RA[reg_store_idx][i][2], RA[reg_store_idx][I][3],
+                lane_smem_a_ptr);
+    }
+  #pragma unroll
+    for (int j = 0; j < WARP_TILE_N; j++) {
+      int warp_smem_b_n = warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N;
+      int lane_smem_b_k = lane_id % 16; //0-15
+      int lane_smem_b_n = warp_smem_b_n;  //0, mma_n = 8
+      uint32_t lane_smem_b_ptr = (smem_b_base_ptr + s_b_mma_k_store_offset * sizeof(half) +
+          (smem_sel * s_b_stage_offset + load_smem_b_k * (BN + B_PAD) + load_smem_b_n) * sizeof(half));
+      LDMATRIX_X2_T(RB[reg_store_idx][j][0], RB[reg_store_idx][j][1],
+                    lane_smem_b_ptr);
+    }
+
+    // MMA compute, first mma_k
+  #pragma unroll
+    for (int i = 0; i < WARP_TILE_M; i++) {
+    #pragma unroll
+      for (int j = 0; j < WARP_TILE_N; j++) {
+        // Warp swizzle: Right -> Left -> Right -> Left
+        int j_s = ((i % 2) && WARP_SWIZZLE) ? (WARP_TILE_N - j - 1) : j;
+        HMMA16816(RC[i][j_s][0], RC[i][j_s][1], RA[reg_load_idx][i][0], 
+                  RA[reg_load_idx][i][1], RA[reg_load_idx][i][2],
+                  RA[reg_load_idx][i][3], RB[reg_load_idx][j_s][0],
+                  RB[reg_load_idx][j_s][1], RC[i][j_s][0], RC[i][j_s][1])
+      }
+    }
+    reg_store_idx ^= 1;
+    reg_store_idx ^= 1;
+    // mma compute , second mma_k
+  #pragma unroll
+    for (int i = 0; i < WARP_TILE_M; i++) {
+    #pragma unroll
+      for (int j = 0; j < WARP_TILE_N; j++) {
+        int j_s = ((i % 2) && WARP_SWIZZLE) ? (WARP_TILE_N - j - 1) : j;
+        HMMA16816(RC[i][j_s][0], RC[i][j_s][1], RA[reg_load_idx][i][0], 
+                  RA[reg_load_idx][i][1], RA[reg_load_idx][i][2],
+                  RA[reg_load_idx][i][3], RB[reg_load_idx][j_s][0],
+                  RB[reg_load_idx][j_s][1], RC[i][j_s][0], RC[i][j_s][1])
+      }
+    }
+    CP_ASYNC_WAIT_GROUP(K_STAGE - 2);
+    __syncthreads();
+
+    // load next k iters to reg buffers
+    // smem -> reg buffers 0
+    int smem_sel_reg = (smem_sel + 1) % K_STAGE;
+  #pragma unroll
+    for (int i = 0; i < WARP_TILE_M; i++) {
+      int warp_smem_a_m = warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M;
+      int lane_smem_a_m = warp_smem_a_m + lane_id % 16;
+      int lane_smem_a_k = (lane_id / 16) * 8;
+      int lane_smem_a_ptr = (smem_a_base_ptr + 
+          (smem_sel_reg * s_a_stage_offset + lane_smem_a_m * (BK + A_PAD) + lane_smem_a_k) * sizeof(half));
+      LDMATRIX_X4(RA[reg_store_idx][i][0], RA[reg_store_idx][i][1],
+                  RA[reg_store_idx][i][2], RA[reg_store_idx][i][3],
+                  lane_smem_a_ptr);
+    }
+  #pragma unroll
+    for (int j = 0; j < WARP_TILE_N; j++) {
+      int warp_smem_b_n = warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N;
+      int lane_smem_b_k = lane_id % 16;
+      int lane_smem_b_n = warp_smem_b_n;
+      int lane_smem_b_ptr = (smem_b_base_ptr +
+          (smem_sel_reg * s_b_stage_offset + lane_smem_b_k * (BN + B_PAD) + lane_smem_b_n) * sizeof(half));
+      LDMATRIX_X2_T(RB[reg_store_idx][j][0], RB[reg_store_idx][j][1],
+                    lane_smem_b_ptr);
+    }  
+  }
+  if constexpr((K_STAGE - 2) > 0) {
+      CP_ASYNC_COMMIT_GROUP(0);
+      __syncthreads();
+  }
+  // process last k tile
 }
