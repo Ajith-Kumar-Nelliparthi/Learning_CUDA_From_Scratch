@@ -802,3 +802,56 @@ __global__ void __launch_bounds__(256)
     }
   }
 }
+
+template <const int MMA_M = 16, const int MMA_N = 8, const int MMA_K = 16,
+          const int MMA_TILE_M = 2, const int MMA_TILE_N = 4,
+          const int WARP_TILE_M = 4, const int WARP_TILE_N = 4,
+          const int WARP_TILE_K = 2, const int A_PAD = 0, const int B_PAD = 0,
+          const int K_STAGE = 2, const bool BLOCK_SWIZZLE = true,
+          const bool WARP_SWIZZLE = true>
+__global__ void __launch_bounds__(256) 
+    hgemm_mma_m16n8k16_mma2x4_warp4x4x2_stages_dsmem_x4_kernel(const half *__restrict__ A, const half *__restrict__ B, const half *__restrict__ C,
+          int M, int N, int K) {
+
+  const int by = blockIdx.y;
+  const int bx = ((int)BLOCK_SWIZZLE) * blockIdx.z * gridDim.x + blockIdx.x;
+  const int NUM_K_TILES = div_ceil(K, MMA_K * WARP_TILE_K);
+  constexpr int BM = MMA_M * MMA_TILE_M * WARP_TILE_M;  //16x2x4 = 128
+  constexpr int BN = MMA_N * MMA_TILE_N * WARP_TILE_N;  //8x4x4 = 128
+  constexpr int BK = MMA_K;   //16x2 = 32
+
+  extern __shared__ half smem[];
+  half *s_a = smem;
+  half *s_b = smem + K_STAGE * BM * (BK + A_PAD) * WARP_TILE_K;
+  constexpr int s_a_stage_offset = BM * (BK + A_PAD);
+  constexpr int s_b_stage_offset = BK * (BN + B_PAD);
+  constexpr int s_a_mma_k_store_offset = K_STAGE * BM * (BK + A_PAD);
+  constexpr int s_b_mma_k_store_offset = K_STAGE * BK * (BN + B_PAD);
+
+  const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+  int warp_id = tid / WARP_SIZE;
+  int lane_id = tid % WARP_SIZE;
+  int warp_m = warp_id % 2;
+  int warp_n = warp_id / 2;
+
+  int load_smem_a_m = tid / 2;
+  int load_smem_a_k = (tid % 2 == 0) ? 0 : 8;
+  int load_smem_b_k = tid / 16;
+  int load_smem_b_n = (tid % 16) * 8;
+  int load_gmem_a_m = by * BM + load_smem_a_m;
+  int load_gmem_b_n = bx * BN + load_smem_b_n;
+  if (load_gmem_a_m >= M || load_gmem_b_n >= N) return;
+
+  uint32_t RC[WARP_TILE_M][WARP_TILE_N][2];
+#pragma unroll
+  for (int i = 0; i < WARP_TILE_M; i++) {
+  #pragma unroll
+    for (int j = 0; j < WARP_TILE_N; j++) {
+      RC[i][j][0] = 0;
+      RC[i][j][1] = 0;
+    }
+  }
+
+  uint32_t smem_a_base_ptr = __cvta_generic_to_shared(s_a);
+  uint32_t smem_b_base_ptr = __cvta_generic_to_shared(s_b);
+}
