@@ -237,5 +237,34 @@ __global__ void __launch_bounds__(256) hgemm_mma_m16n8k16_mma2x4_warp4x4_stages_
 
     {
         // process last k tile
+        for (int i = 0; i < WARP_TILE_M; ++i) {
+            uint32_t RC0[WARP_TILE_N][4];
+            uint32_t RC1[WARP_TILE_N][4];
+#pragma unroll
+      for (int j = 0; j < WARP_TILE_N; ++j) {
+        RC0[j][0] = RC[i][j][0];
+        RC1[j][0] = RC[i][j][1];
+        RC0[j][1] = __shfl_sync((0xffffffff), RC[i][j][0], lane_id + 1);
+        RC0[j][2] = __shfl_sync((0xffffffff), RC[i][j][0], lane_id + 2);
+        RC0[j][3] = __shfl_sync((0xffffffff), RC[i][j][0], lane_id + 3);
+        RC1[j][1] = __shfl_sync((0xffffffff), RC[i][j][1], lane_id + 1);
+        RC1[j][2] = __shfl_sync((0xffffffff), RC[i][j][1], lane_id + 2);
+        RC1[j][3] = __shfl_sync((0xffffffff), RC[i][j][1], lane_id + 3);
+      }
+
+      if (lane_id % 4 == 0) {
+        int store_warp_smem_c_m = warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M;
+        int store_lane_gmem_c_m = by * BM + store_warp_smem_c_m + lane_id / 4;
+#pragma unroll
+        for (int j = 0; j < WARP_TILE_N; ++j) {
+          int store_warp_smem_c_n = warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N;
+          int store_lane_gmem_c_n = bx * BN + store_warp_smem_c_n;
+          int store_gmem_c_addr_0 = store_lane_gmem_c_m * N + store_lane_gmem_c_n;
+          int store_gmem_c_addr_1 = (store_lane_gmem_c_m + 8) * N + store_lane_gmem_c_n;
+          LDST128BITS(C[store_gmem_c_addr_0]) = LDST128BITS(RC0[j][0]);
+          LDST128BITS(C[store_gmem_c_addr_1]) = LDST128BITS(RC1[j][0]);
+        }
+      }
     }
+  }
 }
