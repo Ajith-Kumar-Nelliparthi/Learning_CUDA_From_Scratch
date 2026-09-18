@@ -854,4 +854,52 @@ __global__ void __launch_bounds__(256)
 
   uint32_t smem_a_base_ptr = __cvta_generic_to_shared(s_a);
   uint32_t smem_b_base_ptr = __cvta_generic_to_shared(s_b);
+
+  // prefill (the load)
+#pragma unroll
+  for (int k = 0; k < (K_STAGE - 1); k++) {
+    int load_gmem_a_k = k * MMA_K + load_smem_a_k;
+    int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+    int load_gmem_b_k = k * MMA_K + load_smem_b_k;
+    int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+
+    uint32_t load_smem_a_ptr = (smem_a_base_ptr + 
+        (k * s_a_stage_offset + load_smem_a_m * (BK + A_PAD) + load_smem_a_k) * sizeof(half));
+    CP_ASYNC_CG(load_smem_a_ptr, &A[load_gmem_a_addr], 16);
+    uint32_t load_smem_a_mma_k_ptr = (smem_a_base_ptr + s_a_mma_k_store_offset * sizeof(half) +
+        (k * s_a_stage_offset + load_smem_a_m * (BK + A_PAD) + load_smem_a_k) * sizeof(half));
+    CP_ASYNC_CG(load_smem_a_mma_k_ptr, &A[load_gmem_a_addr + 16], 16);
+
+    uint32_t load_smem_b_ptr = (smem_b_base_ptr + 
+        (k * s_b_stage_offset + load_smem_b_k * (BN + B_PAD) + load_smem_b_n) * sizeof(half));
+    int load_gmem_b_k_mma_k = k * BK * WARP_TILE_K + MMA_K + load_smem_b_k;
+    int load_gmem_b_addr_mma_k = load_gmem_b_k_mma_k * N + load_gmem_b_n;
+    uint32_t load_smem_b_mma_k_ptr = (smem_b_base_ptr + s_b_mma_k_store_offset * sizeof(half) +
+        (k * s_b_stage_offset + load_smem_b_k * (BN + B_PAD) + load_smem_b_n) * sizeof(half));
+    CP_ASYNC_CG(load_smem_b_mma_k_ptr, &B[load_gmem_b_addr_mma_k], 16);
+    CP_ASYNC_COMMIT_GROUP();
+  }
+  CP_ASYNC_WAIT_GROUP(K_STAGE - 2);
+  __syncthreads();
+
+  uint32_t RA[2][WARP_TILE_M][4];
+  uint32_t RB[2][WARP_TILE_N][2];
+
+  int reg_store_idx = 0;
+  int reg_load_idx = 1;
+
+  // ldmatrix for s_a, ldmatrix.trans for s_b.
+  // smem -> reg buffers 0, first MMA_K, 0~15
+  {
+  #pragma unroll
+    for (int i = 0; i < WARP_TILE_M; i++) {
+      int warp_smem_a_m = warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M;
+      int lane_smem_a_m = warp_smem_a_m + (lane_id % 16);
+      int lane_smem_a_k = (lane_id / 16) * 8;
+      uint32_t lane_smem_a_ptr = (smem_a_base_ptr + (0 * s_a_stage_offset + lane_smem_a_m * (BK + A_PAD) + lane_smem_a_k) * sizeof(half));
+      LDMATRIX_X4(RA[reg_store_idx][i][0], RA[reg_store_idx][i][1],
+                  RA[reg_store_idx][i][2], RA[reg_store_idx][i][3],
+                  lane_smem_a_ptr);
+    }
+  }
 }
