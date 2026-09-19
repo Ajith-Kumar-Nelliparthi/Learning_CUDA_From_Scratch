@@ -109,3 +109,180 @@
 
 HOST_DEVICE_INLINE
 int div_ceil(int a, int b) {return (a % b != 0) ? (a / b + 1) : (a / b);}
+
+// i: row index, j: col index
+template <const int kColStride = 16, const int kStep = 8>
+static __device__ __forceinline__ int swizzle_permuted_j(int i, int j) {
+  static_assert(kColStride >= 16, "kColStride must <= 16");
+  static_assert(kStep == 4 || kStep == 8, "kStep must be 4 0r 8");
+  static_assert(kColStride % kStep == 0,
+                "kColstride must be multiple of kStep.");
+  if constexpr (kStep == 8) {
+    return (((j >> 3) ^ (i >> 2)) % (kColStride >> 3)) << 3;
+  } else {
+    static_assert(kStep == 4);
+    return (((j >> 2) ^ (i >> 2)) % (kColStride >> 2)) << 2;
+  }
+}
+
+template <const int kMmmaAtomK = 16>
+static __device__ __forceinline__ int swizzle_permuted_A_j(int i, int j) {
+  // -------------------
+  // -col 0~16, step 8--
+  // -------------------
+  // | row 0  | (0, 8) |
+  // | row 1  | (0, 8) |
+  // | row 2  | (0, 8) |
+  // | row 3  | (0, 8) |
+  // -------------------
+  // | row 4  | (8, 0) |
+  // | row 5  | (8, 0) |
+  // | row 6  | (8, 0) |
+  // | row 7  | (8, 0) |
+  // -------------------
+  // | row 8  | (0, 8) |
+  // | row 9  | (0, 8) |
+  // | row 10 | (0, 8) |
+  // | row 11 | (0, 8) |
+  // -------------------
+  // | row 12 | (8, 0) |
+  // | row 13 | (8, 0) |
+  // | row 14 | (8, 0) |
+  // | row 15 | (8, 0) |
+  // -------------------
+  return swizzle_permuted_j<kMmmaAtomK, 8>(i, j);
+}
+
+template <const int MMA_M = 16, const int MMA_N = 8, const int MMA_K = 16,
+          const int MMA_TILE_M = 2, const int MMA_TILE_N = 4,
+          const int WARP_TILE_M = 4, const int WARP_TILE_N = 4,
+          const int WARP_TILE_K = 2, const int A_PAD = 0, const int B_PAD = 0,
+          const int K_STAGE = 2, const bool BLOCK_SWIZZLE = true,
+          const bool WARP_SWIZZLE = true>
+__global__ void __launch_bounds__(256) 
+  hgemm_mma_m16n8k16_mma2x4_warp4x4x2_stages_dsmem_swizzle_kernel(const half *__restrict__ A, const half *__restrict__ B,
+                      const half *__restrict__ C, int M, int N, int K) {
+  const int bx = ((int)BLOCK_SWIZZLE) * blockIdx.z * gridDim.x + blockIdx.x;
+  const int by = blockIdx.y;
+  const int NUM_K_TILES = div_ceil(K, MMA_K * WARP_TILE_K);
+  constexpr int BM = MMA_M * MMA_TILE_M * WARP_TILE_M;
+  constexpr int BN = MMA_N * MMA_TILE_N * WARP_TILE_N;
+  constexpr int BK = MMA_K;
+
+  extern __shared__ half smem[];
+  half *s_a = smem;
+  half *s_b = smem + K_STAGE * BM * (BK + A_PAD);
+  constexpr int s_a_stage_offset = BM * (BK + A_PAD);
+  constexpr int s_b_stage_offset = BK * (BN + B_PAD);
+  constexpr int s_a_mma_k_store_offset = K_STAGE * BM * (BK + A_PAD);
+  constexpr int s_b_mma_k_store_offset = K_STAGE * BK * (BN + B_PAD);
+
+  const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+  const int warp_id = tid / WARP_SIZE;
+  const int lane_id = tid % WARP_SIZE;
+  const int warp_m = warp_id % 2;
+  const int warp_n = warp_id / 2;
+
+  int load_smem_a_m = tid / 2;
+  int load_smem_a_k = (tid % 2 == 0) ? 0 : 8;
+  int load_smem_b_k = tid / 16;
+  int load_smem_b_n = (tid % 16) * 8;
+  int load_gmem_a_m = by * BM + load_smem_a_m;
+  int load_gmem_b_n = bx * BN + load_smem_b_n;
+  if (load_gmem_a_m >= M || load_gmem_b_n >= N) return;
+
+  uint32_t RC[WARP_TILE_M][WARP_TILE_N][2];
+#pragma unroll
+  for (int i = 0; i < WARP_TILE_M; i++) {
+#pragma unroll
+    for (int j = 0; j < WARP_TILE_N; j++) {
+      RC[i][j][0] = 0;
+      RC[i][j][1] = 0;
+    }
+  }
+
+  uint32_t smem_a_base_ptr = __cvta_generic_to_shared(s_a);
+  uint32_t smem_b_base_ptr = __cvta_generic_to_shared(s_b);
+
+#pragma unroll
+  for (int k = 0; k < (K_STAGE - 1); k++) {
+    int load_gmem_a_k = k * MMA_K + load_smem_a_k;
+    int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+    int load_gmem_b_k = k * MMA_K + load_smem_b_k;
+    int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+
+    uint32_t load_smem_a_ptr = (smem_a_base_ptr +
+        (k * s_a_stage_offset + load_smem_a_m * (BK + A_PAD) + swizzle_permuted_A_j<MMA_K>(load_smem_a_m, load_smem_a_k)) * sizeof(half));
+    CP_ASYNC_CG(load_smem_a_ptr, &A[load_gmem_a_addr], 16); // MMA_K 0
+    uint32_t load_smem_a_mma_k_ptr = (smem_a_base_ptr + s_a_mma_k_store_offset * sizeof(half) +
+        (k * s_a_stage_offset + load_smem_a_m * (BK + A_PAD) + swizzle_permuted_A_j<MMA_K>(load_smem_a_m, load_smem_a_k)) * sizeof(half));
+    CP_ASYNC_CG(load_smem_a_mma_k_ptr, &A[load_gmem_a_addr + 16], 16); // MMA_K 1
+
+    uint32_t load_smem_b_ptr = (smem_b_base_ptr +
+        (k * s_b_stage_offset + load_smem_b_k * (BN + B_PAD) + load_smem_b_n) * sizeof(half));
+    CP_ASYNC_CG(load_smem_b_ptr, &B[load_gmem_b_addr], 16);
+
+    int load_gmem_b_mma_k = k * BK * WARP_TILE_K + MMA_K + load_smem_b_k;
+    int load_gmem_b_addr_mma_k = load_gmem_b_addr_mma_k * N + load_gmem_b_n;
+    uint32_t load_smem_b_mma_k_ptr = (smem_b_base_ptr + s_b_mma_k_store_offset * sizeof(half) +
+        (k * s_b_stage_offset + load_smem_b_k * (BN + B_PAD) + load_smem_b_n) * sizeof(half));
+    CP_ASYNC_CG(load_smem_b_mma_k_ptr, &B[load_gmem_b_addr_mma_k], 16);
+
+    CP_ASYNC_COMMIT_GROUP();
+  }
+  CP_ASYNC_WAIT_GROUP(K_STAGE - 2);
+  __syncthreads();
+
+  uint32_t RA[2][WARP_TILE_M][4];
+  uint32_t RB[2][WARP_TILE_N][2];
+
+  int reg_store_idx = 0;
+  int reg_load_idx = 1;
+
+  {
+    // ldmatrix for s_a, ldmatrix.trans for s_b
+    // smem -> reg buffer 0
+#pragma unroll
+    for (int i = 0; i < WARP_TILE_M; i++) {
+      int warp_smem_a_m = warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M;
+      int lane_smem_a_m = warp_smem_a_m + lane_id % 16;
+      int lane_smem_a_k = (lane_id / 16) * 8;
+      uint32_t lane_smem_a_ptr = (smem_a_base_ptr + 
+          (0 * s_a_stage_offset + lane_smem_a_m * (BK + A_PAD) + swizzle_permuted_A_j<MMA_K>(lane_smem_a_m, lane_smem_a_k)) * sizeof(half));
+      LDMATRIX_X4(RA[reg_store_idx][i][0], RA[reg_store_idx][i][1],
+                  RA[reg_store_idx][i][2], RA[reg_store_idx][i][3],
+                  lane_smem_a_ptr);
+    }
+#pragma unroll
+    for (int j = 0; j < WARP_TILE_N; j++) {
+      int warp_smem_b_n = warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N;
+      int lane_smem_b_k = lane_id % 16;
+      int lane_smem_b_n = warp_smem_b_n;
+      uint32_t lane_smem_b_ptr = (smem_b_base_ptr +
+          (0 * s_b_stage_offset + lane_smem_b_k * (BN + B_PAD) + lane_smem_b_n) * sizeof(half));
+      LDMATRIX_X2_T(RB[reg_store_idx][j][0], RB[reg_store_idx][j][1],
+                    lane_smem_b_ptr);
+    }
+  }
+
+  // main loop
+#pragma unroll
+  for (int k = (K_STAGE - 1); k < NUM_K_TILES; k++) {
+    reg_store_idx ^= 1;   // 0-> 1
+    reg_load_idx ^= 1;    // 1 -> 0
+    int smem_sel = (k + 1) % K_STAGE;
+    int smem_sel_next = k % K_STAGE;
+
+    int load_gmem_a_k = k * BK * WARP_TILE_K + load_smem_a_k;
+    int load_gmem_a_addr = load_gmem_a_m * K + load_gmem_a_k;
+    int load_gmem_b_k = k * BK * WARP_TILE_K + load_smem_b_k;
+    int load_gmem_b_addr = load_gmem_b_k * N + load_gmem_b_n;
+    
+    uint32_t load_smem_a_ptr = (smem_a_base_ptr +
+        (smem_sel_next * s_a_stage_offset + load_smem_a_m * (BK + A_PAD) + swizzle_permuted_A_j<MMA_K>(load_smem_a_m, load_smem_a_k)) * sizeof(half));
+    CP_ASYNC_CG(load_smem_a_ptr, &A[load_gmem_a_addr], 16);
+    uint32_t load_smem_a_mma_k_ptr = (smem_a_base_ptr + s_a_mma_k_store_offset * sizeof(half) +
+        (smem_sel_next * s_a_stage_offset + load_smem_a_m * (BK + A_PAD) + swizzle_permuted_A_j<MMA_K>(load_smem_a_m, load_smem_a_k)) * sizeof(half));
+    CP_ASYNC_CG(load_smem_a_mma_k_ptr, &A[load_gmem_a_addr + 16], 16);
+  }
+}
