@@ -102,4 +102,34 @@ __global__ void __launch_bounds(WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK)
     float lane_block_row_sum_old[kWarpTileSeqLenQ][2];
     fill_2D_regs<float, kWarpTileSeqLenQ, 2>(lane_block_row_max_old, -INFINITY);
     fill_2D_regs<float, kWarpTileSeqLenQ, 2>(lane_block_row_sum_old, 0.0f);
+
+    // registers for s=QK^T /O=PV
+    constexpr bool kCanPrefetchQs2r = ((kHeadDim / kMmaAtomK) <= 8) && (kHeadDim < 64);
+    constexpr bool kDelayPrefetchQs2r = (true && kCanPrefetchQs2r);
+    constexpr bool kCanPrefetchKVg2s = (kStage == 2);
+    constexpr int kPrefetchKg2sSmemId = 0;
+    constexpr int kPrefetchVg2sSmemId = kCanPrefetchKVg2s ? 1 : 0;
+    constexpr int kNumPrefetchQs2r = (kCanPrefetchQs2r) ? (kHeadDim / kMmaAtomK) : 1;
+    
+    uint32_t R_Q[kNumPrefetchQs2r][kWarpTileSeqLenQ][4];
+    uint32_t R_K[kWarpTileSeqLenK][2];
+    uint32_t R_V[kWarpTileHeadDimV][2];
+    uint32_t R_S[kWarpTileSeqLenQ][kWarpTileSeqLenK][2];
+    uint32_t R_O[kWarpTileSeqLenP][kWarpTileHeadDimV][2];
+    uint32_t R_D[kWarpTileSeqLenP][kWarpTileHeadDimV] [(kOStorageAccFloat32) ? 4 : 2];
+    fill_3D_regs<uint32_t, kWarpTileSeqLenP, kWarpTileHeadDimV,
+               ((kOStorageAccFloat32) ? 4 : 2)>(R_D, 0);
+    
+    // load Q from gmem -> smem, load once
+    {
+        int load_gmem_Q_d = load_smem_Q_d;
+        int load_gmem_Q_addr = (Q_gmem_offset + load_gmem_Q_Br * kHeadDim + load_gmem_Q_d);
+        uint32_t load_smem_Q_ptr = (smem_Q_base_ptr + 
+                    (load_smem_Q_Br * (kHeadDim + kPadQ) + load_smem_Q_d) * sizeof(half));
+    #pragma unroll
+        for (int i=0; i < (kHeadDim / (kNumThreads / Br)); i += 8) {
+            CP_ASYNC_CG(load_smem_Q_ptr + i * 2; &Q[load_gmem_Q_addr + i]; 16);
+        }
+        CP_ASYNC_COMMIT_GROUP();
+    }
 }
