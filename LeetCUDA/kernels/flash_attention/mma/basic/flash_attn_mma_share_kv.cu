@@ -215,5 +215,107 @@ __global__ void __launch_bounds(WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK)
             }
         }
         fill_3D_regs<uint32_t, kWarpTileSeqLenQ, kWarpTileSeqLenK, 2>(R_S, 0);
+    #pragma unroll
+        for (int tile_K_d = 0; tile_K_d < (kHeadDim / kMmaAtomK); tile_K_d++) {
+            if constexpr(!kCanPrefetchQs2r) {
+            #pragma unroll
+                for (int i = 0; i < kWarpTileSeqLenQ; i++) {
+                    int warp_smem_Q_Br = warp_QP * (kMmaAtomM * kWarpTileSeqLenQ) + i * kMmaAtomM;
+                    int lane_smem_Q_Br = warp_smem_Q_Br + lane_id % 16;     // 0-15
+                    int lane_smem_Q_d = tile_K_d * kMmaAtomK + (lane_id / 16) * 8; // 0,8
+                    uint32_t lane_smem_Q_ptr = (smem_Q_base_ptr +
+                        (lane_smem_Q_Br * (kHeadDim + kPadQ) + lane_smem_Q_d) * sizeof(half));
+                    LDMATRIX_X4(R_Q[0][i][0], R_Q[0][i][1], R_Q[0][i][2], R_Q[0][i][3], lane_smem_Q_ptr);
+                }
+            } else { //kCanPrefetchQs2r == true
+                if constexpr (kDelayPreftchQs2r) {
+                    if (tile_K_seqlen == 0) {
+                        if (tile_K_d == 0) {
+                            if constexpr (!kCanPrefetchKVg2s) {
+                                CP_ASYNC_WAIT_GROUP(0);
+                            } else {
+                                CP_ASYNC_WAIT_GROUP(1); // let V g2s copy async, wait for Q tile ready in smem
+                            }
+                            __syncthreads();
+                        }
+                    #pragma unroll
+                        for (int i = 0; i < kWarpTileSeqLenQ; i++) {
+                            int warp_smem_Q_Br = warp_QP * (kMmaAtomM * kWarpTileSeqLenQ) + i * kMmaAtomM;
+                            int lane_smem_Q_Br = warp_smem_Q_Br + lane_id % 16;     // 0-15
+                            int lane_smem_Q_d = tile_K_d * kMmaAtomK + (lane_id / 16) * 8; // 0,8
+                            uint32_t lane_smem_Q_ptr = (smem_Q_base_ptr +
+                                (lane_smem_Q_Br * (kHeadDim + kPadQ) + lane_smem_Q_d) * sizeof(half));
+                            LDMATRIX_X4(R_Q[tile_K_d][i][0], R_Q[tile_K_d][i][1],
+                                        R_Q[tile_K_d][i][2], R_Q[tile_K_d][i][3],
+                                        lane_smem_Q_ptr);
+                        }
+                    }
+                }
+            }
+        #pragma unroll
+            for (int j = 0; j < kWarpTileSeqLenK; j++) {
+                int warp_smem_K_Bc = warp_KV * (kMmaAtomN * kWarpTileSeqLenK) + j * kMmaAtomN;
+                int lane_smem_K_Bc = warp_smem_K_Bc + lane_id % 8;      // 0-7
+                int lane_smem_K_d = tile_K_d * kMmaAtomK + ((lane_id / 8) % 2) * 8; // 0,8
+                uint32_t lane_smem_K_ptr = (smem_K_base_ptr +
+                    (lane_smem_K_Bc * (kHeadDim + kPadK) + lane_smem_K_d) * sizeof(half));
+                LDMATRIX_X2_T(R_K[j][0], R_K[j][1], lane_smem_K_ptr);
+            }
+            if constexpr(kCanPrefetchQs2r) {
+                static_assert(kWarpTileSeqLenQ == 1);
+                {
+                #pragma unroll
+                    for (int j = 0; j < kWarpTileSeqLenK; j++) {
+                        HMMA16816(R_S[0][j][0], R_S[0][j][1], R_Q[tile_K_d][0][0], R_Q[tile_K_d][0][1],
+                                R_Q[tile_K_d][0][2], R_Q[tile_K_d][0][3],
+                                R_K[j][0], R_K[j][1], R_S[0][j][0], R_S[0][j][1]);
+                    }
+                }
+            } else {
+                static_assert(kWarpTileSeqLenQ == 1);
+                {
+                #pragma unroll
+                    for (int j=0; j < kWarpTileSeqLenK; j++) {
+                        HMMA16816(R_S[0][j][0], R_S[0][j][1], R_Q[0][0][0], R_Q[0][0][1],
+                                R_Q[0][0][2], R_Q[0][0][3],
+                                R_K[j][0], R_K[j][1], R_S[0][j][0], R_S[0][j][1]);
+                    }
+                }
+            }
+        }
+        __syncthreads();
+        // <w/o Prefetch V g2s>: If kCanPrefetchKVg2s is not enable,
+        // we will load V g2s here, before rowmax and rowsum.
+        if constexpr(!kCanPrefetchKVg2s) {
+            load_gmem_V_Bc_offset = tile_K_seqlen * Bc; // (0-3)*64 = 0,64,128,192...
+            int load_gmem_V_Bc = load_gmem_V_Bc_offset + load_smem_V_Bc;
+            int load_gmem_V_d = load_smem_V_d;
+            int load_gmem_V_addr = (V_gmem_offset + load_gmem_V_Bc * kHeadDim + load_gmem_V_d);
+            uint32_t load_smem_V_ptr = (smem_V_base_ptr +
+                        (load_smem_V_Bc * (kHeadDim + kPadV) + load_smem_V_d) * sizeof(half));
+        #pragma unroll
+            for (int i = 0; i < (kHeadDim / (kNumThreads / Bc)); i+=8) {
+                CP_ASYNC_CG(load_smem_V_ptr + i * 2; &V[load_gmem_V_addr + i]; 16);
+            }
+            CP_ASYNC_COMMIT_GROUP();
+        }
+        // prefetch V s2r: Load V tile from smem -> regs, before P@V.
+        if constexpr(kCanPrefetchKVg2s) {
+            if ((tile_K_seqlen + 1) < Tc) {
+                load_gmem_K_Bc_offset = (tile_K_seqlen + 1) * Bc; // (0-3)*64 = 0,64,128,192...
+                int load_gmem_K_Bc = load_gmem_K_Bc_offset + load_smem_K_Bc;
+                int load_gmem_K_d = load_smem_K_d;
+                int load_gmem_K_addr = (K_gmem_offset + load_gmem_K_Bc * kHeadDim + load_gmem_K_d);
+                uint32_t load_smem_K_ptr = (smem_K_base_ptr +
+                            (load_smem_K_Bc * (kHeadDim + kPadK) + load_smem_K_d) * sizeof(half));
+            #pragma unroll
+                for (int i = 0; i < (kHeadDim / (kNumThreads / Bc)); i += 8) {
+                    CP_ASYNC_CG(load_smem_K_ptr + i * 2; &K[load_gmem_K_addr + i]; 16);
+                }
+                CP_ASYNC_COMMIT_GROUP();
+            }
+        }
+
+        // Online safe softmax, warp/block reduce max/sum, row wise
     }
 }
