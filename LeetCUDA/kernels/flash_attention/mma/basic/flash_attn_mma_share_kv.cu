@@ -317,5 +317,65 @@ __global__ void __launch_bounds(WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK)
         }
 
         // Online safe softmax, warp/block reduce max/sum, row wise
+        float lane_row_max_new[kWarpTileSeqLenQ][2];
+        float lane_row_sum_new[kWarpTileSeqLenQ][2];
+        fill_2D_regs<float, kWarpTileSeqLenQ, 2>(lane_row_max_new, -INFINITY);
+        fill_2D_regs<float, kWarpTileSeqLenQ, 2>(lane_row_sum_new, 0.0f);
+
+        static_assert(kWarpTileSeqLenQ == 1);
+        {
+        #pragma unroll
+            for (int j = 0; j < kWarpTileSeqLenK; j++) {
+                half *t_hptr_S_0_1 = reinterpret_cast<half *>(&(R_S[0][j][0]));
+                // row max after S = Q@K^T / scale
+                float top_max_0 = __half2float(__hmax(t_hptr_S_0_1[0], t_hptr_S_0_1[1])) * scale;
+                float top_max_1 = __half2float(__hmax(t_hptr_S_0_1[2], t_hptr_S_0_1[3])) * scale;
+                lane_row_max_new[0][0] = fmaxf(lane_row_max_new[0][0], top_max_0);
+                lane_row_max_new[0][1] = fmaxf(lane_row_max_new[0][1], top_max_1);
+            }
+
+            // warp reduce max
+            lane_row_max_new[0][0] = warp_reduce_max<float, 4>(lane_row_max_new[0][0]);
+            lane_row_max_new[0][1] = warp_reduce_max<float, 4>(lane_row_max_new[0][1]);
+        }
+        static_assert(kWarpTileSeqLenQ == 1);
+        {
+            float block_row_max_new_0 = lane_row_max_new[0][0];
+            float block_row_max_new_1 = lane_row_max_new[0][1];
+            float block_row_max_old_0 = lane_block_row_max_old[0][0];
+            float block_row_max_old_1 = lane_block_row_max_old[0][1];
+            block_row_new_max_0 = max(block_row_max_old_0, block_row_max_new_0);
+            block_row_new_max_1 = max(block_row_max_old_1, block_row_max_new_1);
+
+        #pragma unroll
+            for (int j=0; j < kWarpTileSeqLenK; j++) {
+                half *t_hptr_S_0_1 = reinterpret_cast<half *>(&(R_S[0][j][0]));
+                // P = Exp(S - m_new), fmaf(x, y, z) = x * y + z;
+                float4 t_reg_S_0_1;
+                t_reg_S_0_1.x = __expf(__fmaf_rn(__half2float(t_hptr_S_0_1[0]) * scale - block_row_new_max_0));
+                t_reg_S_0_1.y = __expf(__fmaf_rn(__half2float(t_hptr_S_0_1[1]) * scale - block_row_new_max_0));
+                t_reg_S_0_1.z = __expf(__fmaf_rn(__half2float(t_hptr_S_0_1[2]) * scale - block_row_new_max_1));
+                t_reg_S_0_1.w = __expf(__fmaf_rn(__half2float(t_hptr_S_0_1[3]) * scale - block_row_new_max_1));
+                lane_row_sum_new[0][0] += (t_reg_S_0_1.x + t_reg_S_0_1.y);
+                lane_row_sum_new[0][1] += (t_reg_S_0_1.z + t_reg_S_0_1.w);
+                // Update R_S for P[Br,Bc] = Exp(S-m), point wise.
+                t_hptr_S_0_1[0] = __float2half_rn(t_reg_S_0_1.x);
+                t_hptr_S_0_1[1] = __float2half_rn(t_reg_S_0_1.y);
+                t_hptr_S_0_1[2] = __float2half_rn(t_reg_S_0_1.z);
+                t_hptr_S_0_1[3] = __float2half_rn(t_reg_S_0_1.w);
+            }
+            lane_row_sum_new[0][0] = warp_reduce_sum<float, 4>(lane_row_sum_new[0][0]);
+            lane_row_sum_new[0][1] = warp_reduce_sum<float, 4>(lane_row_sum_new[0][1]);
+        }
+        if constexpr(kCanPrefetchKVg2s) {
+            if (tile_K_seqlen + 1 < Tc) {
+                CP_ASYNC_WAIT_GROUP(1);     // we have send V & K g2s, wait V and let K async.
+            } else {
+                CP_ASYNC_WAIT_GROUP(0);    // we have only send V g2s.
+            }
+        } else {
+            CP_ASYNC_WAIT_GROUP(0);
+        }
+        __syncthreads();
     }
 }
