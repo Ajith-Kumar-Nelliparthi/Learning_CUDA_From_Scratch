@@ -377,5 +377,32 @@ __global__ void __launch_bounds(WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK)
             CP_ASYNC_WAIT_GROUP(0);
         }
         __syncthreads();
+
+        // hgemm in registers
+        fill_3D_regs<uint32_t, kWarpTileSeqLenP, kWarpTileHeadDimV, 2>(R_O, 0);
+    #pragma unroll
+        for (int tile_V_Bc = 0; tile_V_Bc < (Bc / kMmaAtomK); tile_V_Bc++) {
+        #pragma unroll
+            for (int j =0; j < kWarpTileHeadDimV; j++) {
+                int warp_smem_V_Bd = warp_KV * (kMmaAtomN * kWarpTileHeadDimV) + j * kMmaAtomN;
+                int lane_smem_V_Bc = tile_V_Bc * kMmaAtomK + lane_id % 16;
+                int lane_smem_V_d = warp_smem_V_Bd;
+                uint32_t lane_smem_V_ptr = (smem_V_base_ptr +
+                    (lane_smem_V_Bc * (kHeadDim + kPadV) + lane_smem_V_d) * sizeof(half));
+                LDMATRIX_X2_T(R_V[j][0], R_V[j][1], lane_smem_V_ptr);
+            }
+
+            int w = tile_V_Bc * 2;
+            static_assert(kWarpTileSeqLenP == 1);
+            {
+            #pragma unroll
+                for (int j=0; j<kWarpTileHeadDimV; j++) {
+                    HMMA16816(R_O[0][j][0], R_O[0][j][1], R_S[0][w][0], R_S[0][w][1],
+                        R_S[0][w + 1][0], R_S[0][w + 1][1], R_V[j][0], R_V[j][1],
+                        R_O[0][j][0], R_O[0][j][1]);
+                }
+            }
+        }
+        __syncthreads();
     }
 }
