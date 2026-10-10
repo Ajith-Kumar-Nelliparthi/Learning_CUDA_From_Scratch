@@ -547,6 +547,7 @@ __global__ void __launch_bounds(WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK)
         }
     }
 }
+}
 
 template <const int kHeadDim, const int kStage>
 void launch_flash_attn_mma_stages_split_q_shared_kv(torch::Tensor Q,
