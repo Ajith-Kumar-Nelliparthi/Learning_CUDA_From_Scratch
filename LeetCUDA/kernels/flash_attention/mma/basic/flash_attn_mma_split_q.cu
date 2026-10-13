@@ -338,6 +338,87 @@ __global__ void __launch_bounds__(WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK)
             // rescale factor for O and l, exp(m_old - m)
             float rescale_o_factor_0 = __expf(block_row_max_old_0 - block_row_max_new_0);
             float rescale_o_factor_1 = __expf(block_row_max_old_1 - block_row_max_new_1);
+
+            // 0. Rescale O: Online rescaling O each tile_K_seqlen step, need m_new, m_old.
+            // m = max(m_old, m_new), O_new[Br,d] = exp(m_old - m) * O_old + P@V
+        #pragma unroll
+            for (int j = 0; j < kWarpTileHeadDimV; j++) {
+                float2 t_reg_O_0 = __half22float2(HALF2(R_O[i][j][0]));     // 0~7  {c0, c1}
+                float2 t_reg_O_1 = __half22float2(HALF2(R_O[i][j][1]));     // 8~15 {c2, c3}
+                float2 t_reg_D_0 = __half22float2(HALF2(R_D[i][j][0]));
+                float2 t_reg_D_1 = __half22float2(HALF2(R_D[i][j][1]));
+
+                t_reg_D_0.x = __fmaf_rn(rescale_o_factor_0, t_reg_D_0.x, t_reg_O_0.x);
+                t_reg_D_0.y = __fmaf_rn(rescale_o_factor_0, t_reg_D_0.x, t_reg_O_0.y);
+                t_reg_D_1.x = __fmaf_rn(rescale_o_factor_1, t_reg_D_1.x, t_reg_O_1.x);
+                t_reg_D_1.y = __fmaf_rn(rescale_o_factor_1, t_reg_D_1.y, t_reg_O_1.y);
+                HALF2(R_D[i][j][0]) = __float2half2_rn(t_reg_D_0);
+                HALF2(R_D[i][j][1]) = __float2half2_rn(t_reg_D_1);
+            }
+
+            float block_row_sum_old_0 = lane_block_row_sum_old[i][0];
+            float block_row_sum_old_1 = lane_block_row_sum_old[i][1];
+            // Update l = exp(m_old - m_new) * l_old + row_sum(P).
+            lane_block_row_sum_old[i][0] = (__fmaf_rn(rescale_o_factor_0, block_row_sum_old_0, block_row_sum_new_0));
+            lane_block_row_sum_old[i][1] = (__fmaf_rn(rescale_o_factor_1, block_row_sum_old_1, block_row_sum_new_1));
+            // 2. Then, update block row max for each lane.
+            lane_block_row_max_old[i][0] = block_row_max_new_0;
+            lane_block_row_max_old[i][1] = block_row_max_new_1;
+        }
+
+        if constexpr(kStage > 1) {
+            if ((tile_K_seqlen + 1) < Tc) {
+                CP_ASYNC_WAIT_GROUP(0);
+            }
+            __syncthreads();
+        }
+    }
+    __syncthreads();
+
+    // Finaly, we still have to rescale O once more.
+    // O_output(D) = ( 1/l_final ) * O_final (FA2 paper)
+#pragma unroll
+    for (int i = 0; i < kWarpTileSeqLenP; i++) {
+        float rescale_factor_0 = __frcp_rn(lane_block_row_sum_old[i][0]);
+        float rescale_factor_1 = __frcp_rn(lane_block_row_sum_old[i][1]);
+#pragma unroll
+        for (int j = 0; j < kWarpTileHeadDimV; j++) {
+            float2 t_reg_D_0 = __half22float2(R_D[i][j][0]);
+            float2 t_reg_D_1 = __half22float2(R_D[i][j][1]);
+            t_reg_D_0.x = rescale_factor_0 * t_reg_D_0.x;
+            t_reg_D_0.y = rescale_factor_0 * t_reg_D_0.y;
+            t_reg_D_1.x = rescale_factor_1 * t_reg_D_1.x;
+            t_reg_D_1.y = rescale_factor_1 * t_reg_D_1.y;
+            HALF2(R_D[i][j][0]) = __float2half2_rn(t_reg_D_0);
+            HALF2(R_D[i][j][1]) = __float2half2_rn(t_reg_D_1);
+        }
+    }
+
+    // Store O(D): Write O[Br,d] from regs -> gmem, collective store
+#pragma unroll
+    for (int i = 0; i < kWarpTileSeqLenP; i++) {
+#pragma unroll
+        for (int j = 0; j < kWarpTileHeadDimV; j++) {
+            uint32_t R_Z[2][4];
+            R_Z[0][0] = R_D[i][j][0];
+            R_Z[1][0] = R_D[i][j][1];
+            R_Z[0][1] = __shfl_sync((0xffffffff), R_D[i][j][0], lane_id + 1, 4);
+            R_Z[0][2] = __shfl_sync((0xffffffff), R_D[i][j][0], lane_id + 2, 4);
+            R_Z[0][3] = __shfl_sync((0xffffffff), R_D[i][j][0], lane_id + 3, 4);
+            R_Z[1][1] = __shfl_sync((0xffffffff), R_D[i][j][1], lane_id + 1, 4);
+            R_Z[1][2] = __shfl_sync((0xffffffff), R_D[i][j][1], lane_id + 2, 4);
+            R_Z[1][3] = __shfl_sync((0xffffffff), R_D[i][j][1], lane_id + 3, 4);
+
+            if (lane_id % 4 == 0) {
+                int store_warp_regs_O_Br = warp_QP * (kMmaAtomM * kWarpTileSeqLenP) + i * kMmaAtomM;
+                int store_lane_gmem_O_Br = O_tile_id * Br + store_warp_regs_O_Br + lane_id / 4;
+                int store_warp_reg_O_d = warp_KV * (kMmaAtomN * kWarpTileHeadDimV) + j * kMmaAtomN;
+                int store_lane_gmem_O_d = store_warp_reg_O_d;
+                int store_gmem_O_addr_0 = (O_gemm_offset + (store_lane_gmem_O_Br + 0) * kHeadDim + store_lane_gmem_O_d);
+                int store_gmem_O_addr_1 = (O_gemm_offset + (store_lane_gmem_O_Br + 8) * kHeadDim + store_lane_gmem_O_d);
+                LDST128BITS(O[store_gmem_O_addr_0]) = LDST128BITS(R_Z[0][0]);
+                LDST128BITS(O[store_gmem_O_addr_1]) = LDST128BITS(R_Z[1][0]);
+            }
         }
     }
 }
