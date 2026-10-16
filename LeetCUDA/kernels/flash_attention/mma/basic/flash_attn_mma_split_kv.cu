@@ -224,5 +224,80 @@ __global__ void __launch_bounds__(WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK)
             }
         }
         __syncthreads();
+
+        float lane_row_max_new[kWarpTileSeqLenQ][2];
+        float lane_row_sum_new[kWarpTileSeqLenQ][2];
+        fill_2D_regs<float, kWarpTileSeqLenQ, 2>(lane_row_max_new, -INFINITY);
+        fill_2D_regs<float, lane_row_sum_new, 2>(lane_row_sum_new, 0.0f);
+
+    #pragma unroll
+        for (int i = 0; i < kWarpTileSeqLenQ; i++) {
+    #pragma unroll
+            for (int j = 0; j < kWarpTileSeqLenK; j++) {
+                float2 t_reg_S_0 = __half22float2(R_S[i][j][0]);    //0-7 {c0, c1}
+                float2 t_reg_S_1 = __half22float2(R_S[i][j][1]);    //8-15 {c2, c3}
+                float top_max_0 = max(t_reg_S_0.x, t_reg_S_0.y) * scale;
+                float top_max_1 = max(t_reg_S_1.x, t_reg_S_1.y) * scale;
+                lane_row_max_new[i][0] = max(lane_row_max_new[i][0], top_max_0);
+                lane_row_max_new[i][1] = max(lane_row_max_new[i][1], top_max_1);
+            }
+            // warp level reduce max
+            lane_row_max_new[i][0] = warp_reduce_max<float, 4>(lane_row_max_new[i][0]);
+            lane_row_max_new[i][1] = warp_reduce_max<float, 4>(lane_row_max_new[i][1]);
+
+            if (lane_id % 4 == 0) {
+                block_row_max_new_smem[warp_QP * 32 + i * 16 + 0 * 8 + (lane_id / 4)][warp_KV] = lane_row_max_new[i][0];
+                block_row_max_new_smem[warp_QP * 32 + i * 16 + 1 * 8 + (lane_id / 4)][warp_KV] = lane_row_max_new[i][1];
+            }
+        }
+        __syncthreads();
+
+        float wrp_row_max_new = (block_row_max_new_smem[tid / kWarpTileSeqLenK][tid % kWarpTileSeqLenK]); //[0-63][0-4]
+        float blk_row_max_new = warp_reduce_max<float, 4>(wrp_row_max_new);
+        block_row_max_new_smem[tid / kWarpTileSeqLenK][tid % kWarpTileSeqLenK] = blk_row_max_new;
+        __syncthreads();
+
+        // Exp sum and mul scale_factor for [Br,Bc] tile, Thread -> Warp -> Block.
+    #pragma unroll
+        for (int i = 0; i < kWarpTileSeqLenQ; i++) {
+            float block_row_max_new_0 = block_row_max_new_smem[warp_QP * 32 + i * 16 + 0 * 8 + (lane_id / 4)][0];
+            float block_row_max_new_1 = block_row_max_new_smem[warp_QP * 32 + i * 16 + 1 * 8 + (lane_id / 4)][0];
+
+            float block_row_max_old_0 = lane_block_row_max_old[i][0];
+            float block_row_max_old_1 = lane_block_row_max_old[i][1];
+
+            block_row_max_new_0 = max(block_row_max_old_0, block_row_max_new_0);
+            block_row_max_new_1 = max(block_row_max_old_1, block_row_max_new_1);
+
+        #pragma unroll
+            for (int j = 0; j < kWarpTileSeqLenK; j++) {
+                float2 t_reg_S_0 = __half22float2(R_S[i][j][0]);
+                float2 t_reg_S_1 = __half22float2(R_S[i][j][1]);
+
+                t_reg_S_0.x = __expf(__fmaf_rn(t_reg_S_0.x, scale, -block_row_max_new_0));
+                t_reg_S_0.y = __expf(__fmaf_rn(t_reg_S_0.y, scale, -block_row_max_new_0));
+                t_reg_S_1.x = __expf(__fmaf_rn(t_reg_S_1.x, scale, -block_row_max_new_1));
+                t_reg_S_1.y = __expf(__fmaf_rn(t_reg_S_1.y, scale, -block_row_max_new_1));
+
+                lane_row_sum_new[i][0] += (t_reg_S_0.x + t_reg_S_0.y);
+                lane_row_sum_new[i][1] += (t_reg_S_1.x + t_reg_S_1.y);
+                HALF2(R_S[i][j][0]) = __float22half2_rn(t_reg_S_0);
+                HALF2(R_S[i][j][1]) = __float22half2_rn(t_reg_S_1);
+            }
+
+            lane_row_sum_new[i][0] = warp_reduce_sum<float, 4>(lane_row_sum_new[i][0]);
+            lane_row_sum_new[i][1] = warp_reduce_sum<float, 4>(lane_row_sum_new[i][1]);
+
+            if (lane_id % 4 == 0) {
+                block_row_sum_new_smem[warp_QP * 32 + i * 16 + 0 * 8 + (lane_id / 4)][warp_KV] = lane_row_sum_new[i][0];
+                block_row_max_new_smem[warp_QP * 32 + i * 16 + 1 * 8 + (lane_id / 4)][warp_KV] = lane_row_sum_new[i][1];
+            }
+        }
+        __syncthreads();
+
+        float wrp_row_sum_new = (block_row_sum_new_smem[tid / kWarpTileSeqLenK][tid % kWarpTileSeqLenK]);
+        float blk_row_sum_new = warp_reduce_sum<float, 4>(wrp_row_sum_new);
+        block_row_sum_new_smem[tid / kWarpTileSeqLenK][tid % kWarpTileSeqLenK] = (blk_row_sum_new);
+        __syncthreads();
     }
 }
