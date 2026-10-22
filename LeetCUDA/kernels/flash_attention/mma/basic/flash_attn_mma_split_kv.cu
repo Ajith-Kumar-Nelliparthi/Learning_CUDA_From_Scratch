@@ -299,5 +299,176 @@ __global__ void __launch_bounds__(WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK)
         float blk_row_sum_new = warp_reduce_sum<float, 4>(wrp_row_sum_new);
         block_row_sum_new_smem[tid / kWarpTileSeqLenK][tid % kWarpTileSeqLenK] = (blk_row_sum_new);
         __syncthreads();
+
+        // Write R_P(R_S) to P_smem [Br,Bc]
+    #pragma unroll
+        for (int i = 0; i < kWarpTileSeqLenQ; ++i) {
+    #pragma unroll
+            for (int j = 0; j < kWarpTileSeqLenK; j++) {
+                R_Q[0][0] = R_S[i][j][0];
+                R_Q[1][0] = R_S[i][j][1];
+                R_Q[0][1] = __shfl_sync((0xffffffff), R_S[i][j][0], lane_id + 1, 4);
+                R_Q[0][2] = __shfl_sync((0xffffffff), R_S[i][j][0], lane_id + 2, 4);
+                R_Q[0][3] = __shfl_sync((0xffffffff), R_S[i][j][0], lane_id + 3, 4);
+                R_Q[1][1] = __shfl_sync((0xffffffff), R_S[i][j][1], lane_id + 1, 4);
+                R_Q[1][1] = __shfl_sync((0xffffffff), R_S[i][j][1], lane_id + 2, 4);
+                R_Q[1][3] = __shfl_sync((0xffffffff), R_S[i][j][1], lane_id + 3, 4);
+
+                if (lane_id % 4 == 0) {
+                    int store_warp_regs_S_Br = warp_QP * (kMmaAtomM * kWarpTileSeqLenQ) + i * kMmaAtomM;
+                    int store_lane_smem_S_Br = store_warp_regs_S_Br + lane_id / 4;
+                    int store_warp_regs_S_Bc = warp_KV * (kMmaAtomN + kWarpTileSeqLenK) + j * kMmaAtomN;
+                    int store_lane_smem_S_Bc = store_warp_regs_S_Bc;
+                    int store_smem_S_addr_0 = ((store_lane_smem_S_Br + 0) * (Bc + kPad) + store_lane_smem_S_Bc);
+                    int store_smem_S_addr_1 = ((store_lane_smem_S_Br + 8) * (Bc + kPad) + store_lane_smem_S_Bc);
+                    LDST128BITS(S_tile_smem[store_smem_S_addr_0]) = LDST128BITS(R_Q[0][0]);
+                    LDST128BITS(S_tile_smem[store_smem_S_addr_1]) = LDST128BITS(R_Q[1][0]);
+                }
+            }
+        }
+        __syncthreads();
+
+        if constexpr(kStage > 1) {
+            if ((tile_K_seqlen + 1) < Tc) {
+                CP_ASYNC_WAIT_GROUP(1);
+            } else {
+                CP_ASYNC_WAIT_GROUP(0);
+            }
+        } else {
+            CP_ASYNC_WAIT_GROUP(0);
+        }
+        __syncthreads();
+
+        fill_3D_regs<uint32_t, kWarpTileSeqLenP, kWarpTileHeadDimV, 2>(R_O, 0);
+    #pragma unroll
+        for (int tile_V_Bc = 0; tile_V_Bc < (Bc / kMmaAtomK); tile_V_Bc++) {
+        #pragma unroll
+            for (int i = 0; i < kWarpTileSeqLenP; i++) {
+                int warp_smem_S_Br = warp_QP * (kMmaAtomM * kWarpTileSeqLenP) + i * kMmaAtomM;
+                int lane_smem_S_Br = warp_smem_S_Br + lane_id % 16;
+                int lane_smem_S_Bc = tile_V_Bc * kMmaAtomK + (lane_id / 16) * 8;
+                uint32_t lane_smem_S_ptr = (smem_S_base_ptr + (lane_smem_S_Br * (Bc + kPad) + lane_smem_S_Bc) * sizeof(half));
+                LDMATRIX_X4(R_Q[i][0], R_Q[i][1], R_Q[i][2], R_Q[i][3],
+                    lane_smem_S_ptr); 
+            }
+        #pragma unroll
+            for (int j = 0; j < kWarpTileHeadDimV; j++) {
+                int warp_smem_V_d = warp_KV * (kMmaAtomN * kWarpTileHeadDimV) + j * kMmaAtomN;
+                int lane_smem_V_Bc = tile_V_Bc * kMmaAtomK + (lane_id % 16);
+                int lane_smem_V_d = warp_smem_V_d;
+                uint32_t lane_smem_V_ptr = (smem_V_base_ptr + (lane_smem_V_Bc * (kHeadDim + kPad) + lane_smem_V_d) * sizeof(half));
+                LDMATRIX_X2_T(R_V[j][0], R_V[j][1], lane_smem_V_ptr);
+            }
+
+        #pragma unroll
+            for (int i = 0; i < kWarpTileSeqLenP; i++) {
+        #pragma unroll
+                for (int j = 0; j < kWarpTileHeadDimV; j++) {
+                    HMMA16816(R_O[i][j][0], R_O[i][j][1], R_Q[i][0], R_Q[i][1], R_Q[i][2],
+                    R_Q[i][3], R_V[j][0], R_V[j][1], R_O[i][j][0],
+                    R_O[i][j][1]);
+                }
+            }
+        }
+        __syncthreads();
+
+        // rescale O
+    #pragma unroll
+        for (int i = 0; i < kWarpTileSeqLenP; i++) {
+            float block_row_max_new_0 = block_row_max_new_smem[warp_QP * 32 + i * 16 + 0 * 8 + (lane_id / 4)][0];
+            float block_row_max_new_1 = block_row_max_new_smem[warp_QP * 32 + i * 16 + 1 * 8 + (lane_id / 4)][0];
+            float block_row_sum_new_0 = block_row_sum_new_smem[warp_QP * 32 + i * 16 + 0 * 8 + (lane_id / 4)][0];
+            float block_row_sum_new_1 = block_row_sum_new_smem[warp_QP * 32 + i * 16 + 1 * 8 + (lane_id / 4)][0];
+
+            float block_row_max_old_0 = lane_block_row_max_old[i][0];
+            float block_row_max_old_1 = lane_block_row_max_old[i][1];
+
+            block_row_max_new_0 = max(block_row_max_old_0, block_row_max_new_0);
+            block_row_max_new_1 = max(block_row_max_old_1, block_row_max_new_1);
+
+            block_row_max_old_0 = (tile_K_seqlen > 0 ? block_row_max_old_0 : block_row_max_new_0);
+            block_row_max_old_1 = (tile_K_seqlen > 0 ? block_row_max_old_1 : block_row_max_new_1);
+
+            // rescale factor for O and l, exp(m_old - m)
+            float rescale_o_factor_0 = __expf(block_row_max_old_0 - block_row_max_new_0);
+            float rescale_o_factor_1 = __expf(block_row_max_old_1 - block_row_max_new_1);
+
+        #pragma unroll
+            for (int j = 0; j < kWarpTileHeadDimV; j++) {
+                float2 t_reg_O_0 = __half22float2(HALF2(R_O[i][j][0]));
+                float2 t_reg_O_1 = __half22float2(HALF2(R_O[i][j][1]));
+                float2 t_reg_D_0 = __half22float2(HALF2(R_D[i][j][0]));
+                float2 t_reg_D_1 = __half22float2(HALF2(R_D[i][j][1]));
+
+                t_reg_D_0.x = __fmaf_rn(rescale_o_factor_0, t_reg_D_0.x, t_reg_O_0.x);
+                t_reg_D_0.y = __fmaf_rn(rescale_o_factor_0, t_reg_D_0.y, t_reg_O_0.y);
+                t_reg_D_1.x = __fmaf_rn(rescale_o_factor_1, t_reg_D_1.x, t_reg_O_1.x);
+                t_reg_D_1.y = __fmaf_rn(rescale_o_factor_1, t_reg_D_1.y, t_reg_O_1.y);
+                HALF2(R_D[i][j][0]) = __float22half2_rn(t_reg_D_0);
+                HALF2(R_D[i][j][1]) = __float22half2_rn(t_reg_D_1);
+            }
+
+            float block_row_sum_old_0 = lane_block_row_sum_old[i][0];
+            float block_row_sum_old_1 = lane_block_row_sum_old[i][1];
+
+            lane_block_row_sum_old[i][0] = (__fmaf_rn(rescale_o_factor_0, block_row_sum_old_0, block_row_sum_new_0));
+            lane_block_row_sum_old[i][1] = (__fmaf_rn(rescale_o_factor_1, block_row_sum_old_1, block_row_sum_new_1));
+
+            lane_block_row_max_old[i][0] = block_row_max_new_0;
+            lane_block_row_max_old[i][1] = block_row_max_new_1;
+        }
+
+        if constexpr(kStage > 1) {
+            if ((tile_K_seqlen + 1) < Tc) {
+                CP_ASYNC_WAIT_GROUP(0);
+            }
+            __syncthreads();
+        }
+    }
+    __syncthreads();
+
+#pragma unroll
+    for (i = 0; i < kWarpTileSeqLenP; ++i) {
+        float rescale_factor_0 = __frcp_rn(lane_block_row_sum_old[i][0]);
+        float rescale_factor_1 = __frcp_rn(lane_block_row_sum_old[i][1]);
+    #pragma unroll
+        for (int j = 0; j < kWarpTileHeadDimV; ++j) {
+            float2 t_reg_D_0 = __half22float2(HALF2(R_D[i][j][0]));
+            float2 t_reg_D_1 = __half22float2(HALF2(R_D[i][j][1]));
+            t_reg_D_0.x = rescale_factor_0 * t_reg_D_0.x;
+            t_reg_D_0.y = rescale_factor_0 * t_reg_D_0.y;
+            t_reg_D_1.x = rescale_factor_1 * t_reg_D_1.x;
+            t_reg_D_1.y = rescale_factor_1 * t_reg_D_1.y;
+            HALF2(R_D[i][j][0]) = __float22half2_rn(t_reg_D_0);
+            HALF2(R_D[i][j][1]) = __float22half2_rn(t_reg_D_1);
+        }
+    }
+
+    // store O(D)
+#pragma unroll
+    for (int i = 0; i < kWarpTileSeqLenP; ++i) {
+#pragma unroll
+        for (int j = 0; j < kWarpTileHeadDimV; ++j) {
+            static_assert(kWarpTileSeqLenQ >= 2);
+            R_Q[0][0] = R_D[i][j][0];
+            R_Q[1][0] = R_D[i][j][1];
+            R_Q[0][1] = __shfl_sync((0xffffffff), R_D[i][j][0], lane_id + 1, 4);
+            R_Q[0][2] = __shfl_sync((0xffffffff), R_D[i][j][0], lane_id + 2, 4);
+            R_Q[0][3] = __shfl_sync((0xffffffff), R_D[i][j][0], lane_id + 3, 4);
+            R_Q[1][1] = __shfl_sync((0xffffffff), R_D[i][j][1], lane_id + 1, 4);
+            R_Q[1][2] = __shfl_sync((0xffffffff), R_D[i][j][1], lane_id + 2, 4);
+            R_Q[1][3] = __shfl_sync((0xffffffff), R_D[i][j][1], lane_id + 3, 4);
+
+            if (lane_id % 4 == 0) {
+                int store_warp_regs_O_Br = warp_QP * (kMmaAtomM * kWarpTileSeqLenP) + i * kMmaAtomM;
+                int store_lane_gmem_O_Br = O_tile_id * Br + store_warp_regs_O_Br + lane_id / 4;
+                int store_warp_regs_O_d = warp_KV * (kMmaAtomN * kWarpTileHeadDimV) + j * kMmaAtomN;
+                int store_lane_gmem_O_d = store_warp_regs_O_d;
+                int store_gmem_O_addr_0 = (O_gmem_offset + (store_lane_gmem_O_Br + 0) * kHeadDim + store_lane_gmem_O_d);
+                int store_gmem_O_addr_1 = (O_gmem_offset + (store_lane_gmem_O_Br + 8) * kHeadDim + store_lane_gmem_O_d);
+                LDST128BITS(O[store_gmem_O_addr_0]) = LDST128BITS(R_Q[0][0]);
+                LDST128BITS(O[store_gmem_O_addr_1]) = LDST128BITS(R_Q[1][0]);
+            }
+        }
     }
 }
