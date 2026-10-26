@@ -80,4 +80,152 @@ __global__ void __launch_bounds__(WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK)
     float lane_block_row_sum_old[kWarpTileSeqLenQ][2];
     fill_2D_regs<float, kWarpTileSeqLenQ, 2>(lane_block_row_max_old, -INFINITY);
     fill_2D_regs<float, kWarpTileSeqLenQ, 2>(lane_block_row_sum_old, 0.0f);
+
+    constexpr bool kCanPrefetchQs2r = ((kHeadDim / kMmaAtomK) <= 8) && (kHeadDim < 64);
+    constexpr bool kDelayPrefetchQs2r = (true && kCanPrefetchQs2r);
+    constexpr bool kCanPrefetchKVg2s = (kStage == 2);
+    constexpr int kPrefetchKg2sSmemId = 0;
+    constexpr int kPrefetchVg2sSmemId = kCanPrefetchKVg2s ? 1 : 0;
+    constexpr int kNumPrefetchQs2r = (kCanPrefetchQs2r) ? (kHeadDim / kMmaAtomK) : 1;
+
+    uint32_t R_Q[kNumPrefetchQs2r][kWarpTileSeqLenQ][4];
+    uint32_t R_K[kWarpTileSeqLenK][2];
+    uint32_t R_V[kWarpTileHeadDimV][2];
+    uint32_t R_S[kWarpTileSeqLenQ][kWarpTileSeqLenK][2];
+    uint32_t R_O[kWarpTileSeqLenP][kWarpTileHeadDimV][2];
+    uint32_t R_D[kWarpTileSeqLenP][kWarpTileHeadDimV][(kOStorageAccFloat32) ? 4 : 2];
+    fill_3D_regs<uint32_t, kWarpTileSeqLenP, kWarpTileHeadDimV, ((kOStorageAccFloat32) ? 4 : 2)>(R_D, 0);
+
+    // load Q from gmem -> smem, once
+    {
+        int load_gmem_Q_d = load_smem_Q_d;
+        int load_gmem_Q_addr = (Q_gmem_offset + load_gmem_Q_Br * kHeadDim + load_gmem_Q_d);
+        uint32_t load_smem_Q_ptr = (smem_Q_base_ptr + (load_smem_Q_Br * (kHeadDim + kPadQ) + load_smem_Q_d) * sizeof(half));
+    #pragma unroll
+        for (int i = 0 ; i < (kHeadDim / (kNumThreads / Br)); i+= 8) {
+            CP_ASYNC_CG(load_smem_Q_ptr + i * 2, &Q[load_gmem_Q_addr + i], 16);
+        }
+        CP_ASYNC_COMMIT_GROUP();
+    }
+
+#pragma unroll
+    for (int tile_K_seqlen = 0; tile_K_seqlen < Tc; tile_K_seqlen++) {
+        if constexpr(kCanPrefetchKVg2s) {
+            if (tile_K_seqlen == 0) {
+                load_gmem_K_Bc_offset = tile_K_seqlen * Bc;
+                int load_gmem_K_Bc = load_gmem_K_Bc_offset + load_smem_K_Bc;
+                int load_gmem_K_d = load_smem_K_d;
+                int load_gmem_K_addr = (K_gmem_offset + load_gmem_K_Bc * kHeadDim + load_gmem_K_d);
+                uint32_t load_smem_K_ptr = (smem_K_base_ptr + (kPrefetchKg2sSmemId * K_tile_size + 
+                                            load_smem_K_Bc * (kHeadDim + kPadK) + load_smem_K_d) * sizeof(half));
+            #pragma unroll
+                for (int i = 0; i < (kHeadDim / (kNumThreads / Bc)); i += 8) {
+                    CP_ASYNC_CG(load_smem_K_ptr + i * 2, &K[load_gmem_K_addr + i], 16);
+                }
+                CP_ASYNC_COMMIT_GROUP();
+
+                CP_ASYNC_WAIT_GROUP(0);
+                __syncthreads();
+            }
+            {
+                load_gmem_V_Bc_offset = tile_K_seqlen * Bc;
+                int load_gmem_V_Bc = load_gmem_V_Bc_offset + load_smem_V_Bc;
+                int load_gmem_V_d = load_smem_V_d;
+                int load_gmem_V_addr = V_gmem_offset + load_gmem_V_Bc * kHeadDim + load_gmem_V_d;
+                uint32_t load_smem_V_ptr = (smem_V_base_ptr + (kPrefetchVg2sSmemId * V_tile_size +
+                        load_smem_V_Bc * (kHeadDim + kPadV) + load_smem_V_d) * sizeof(half));
+            #pragma unroll
+                for (int i = 0; i < (kHeadDim / (kNumThreads / Bc)); i+=8) {
+                    CP_ASYNC_CG(load_smem_V_ptr + i * 2, &V[load_gmem_V_addr + i], 16);
+                }
+                CP_ASYNC_COMMIT_GROUP();
+            }
+        } else {
+            load_gmem_K_Bc_offset = tile_K_seqlen * Bc;
+            int load_gmem_K_Bc = load_gmem_K_Bc_offset + load_smem_K_Bc;
+            int load_gmem_K_d = load_smem_K_d;
+            int load_gmem_K_addr = (K_gmem_offset + load_gmem_K_Bc * kHeadDim + load_gmem_K_d);
+            uint32_t load_smem_K_ptr = (smem_K_base_ptr + (kPrefetchKg2sSmemId * K_tile_size +
+                    load_smem_K_Bc * (kHeadDim + kPadK) + load_smem_K_d) * sizeof(half));
+        #pragma unroll
+            for (int i = 0; i < (kHeadDim / (kNumThreads / Bc)); i += 8) {
+                CP_ASYNC_CG(load_smem_K_ptr + i * 2, &K[load_gmem_K_addr + i], 16);
+            }
+            CP_ASYNC_COMMIT_GROUP();
+
+            CP_ASYNC_WAIT_GROUP(0);
+            __syncthreads();
+        }
+
+        // prefetch Qs2r: smem -> regs
+        if constexpr(kCanPrefetchQs2r && (!kDelayPrefetchQs2r)) {
+            if (tile_K_seqlen == 0) {
+                if constexpr(!kCanPrefetchKVg2s) {
+                    CP_ASYNC_WAIT_GROUP(0);
+                } else {
+                    CP_ASYNC_WAIT_GROUP(1);
+                }
+                __syncthreads();
+
+            #pragma unroll
+                for (int tile_K_d = 0; tile_K_d < (kHeadDim / kMmaAtomK); ++tile_K_d) {
+            #pragma unroll
+                    for (int i = 0; i < kWarpTileSeqLenQ; i++) {
+                        int warp_smem_Q_Br = warp_QP * (kMmaAtomM * kWarpTileSeqLenQ) + i * kMmaAtomM;
+                        int lane_smem_Q_Br = warp_smem_Q_Br + lane_id % 16;
+                        int lane_smem_Q_d = tile_K_d * kMmaAtomK + (lane_id / 16) * 8;
+                        uint32_t lane_smem_Q_ptr = (smem_Q_base_ptr + (lane_smem_Q_Br * (kHeadDim + kPadQ) + lane_smem_Q_d) * sizeof(half));
+                        LDMATRIX_X4(R_Q[tile_K_d][i][0], R_Q[tile_K_d][i][1],
+                                    R_Q[tile_K_d][i][2], R_Q[tile_K_d][i][3], lane_smem_Q_ptr);
+                    }
+                }
+                __syncthreads();
+            }
+        }
+
+        fill_3D_regs<uint32_t, kWarpTileSeqLenQ, kWarpTileSeqLenK, 4>(R_S, 0);
+    #pragma unroll
+        for (int tile_K_d = 0; tile_K_d < (kHeadDim / kMmaAtomK); ++tile_K_d) {
+            if constexpr(!kCanPrefetchQs2r) {
+            #pragma unroll
+                for (int i = 0; i < kWarpTileSeqLenQ; i++) {
+                    int warp_smem_Q_Br = warp_QP * (kMmaAtomM * kWarpTileSeqLenQ) + i * kMmaAtomM;
+                    int lane_smem_Q_Br = warp_smem_Q_Br + (lane_id % 16);
+                    int lane_smem_Q_d = tile_K_d * kMmaAtomK + (lane_id / 16) * 8;
+                    uint32_t lane_smem_Q_ptr = (smem_Q_base_ptr + (lane_smem_Q_Br * (kHeadDim + kPadQ) + lane_smem_Q_d) * sizeof(half));
+                    LDMATRIX_X4(R_Q[0][i][0], R_Q[0][i][1], R_Q[0][i][2], R_Q[0][i][3], lane_smem_Q_ptr);
+                }
+            } else {
+                if constexpr(kDelayPrefetchQs2r) {
+                    if (tile_K_seqlen == 0) {
+                        if (tile_K_d == 0) {
+                            if constexpr (!kCanPrefetchKVg2s) {
+                                CP_ASYNC_WAIT_GROUP(0);
+                            } else {
+                                CP_ASYNC_WAIT_GROUP(1);
+                            }
+                            __syncthreads();
+                        }
+                    #pragma unroll
+                        for (int i = 0; i < kWarpTileSeqLenQ; i++) {
+                            int warp_smem_Q_Br = warp_QP * (kMmaAtomM * kWarpTileSeqLenQ) + i * kMmaAtomM;
+                            int lane_smem_Q_Br = warp_smem_Q_Br + (lane_id % 16);
+                            int lane_smem_Q_d = tile_K_d * kMmaAtomK + (lane_id / 16) * 8;
+                            uint32_t lane_smem_Q_ptr = (smem_Q_base_ptr + (lane_smem_Q_Br * (kHeadDim + kPadQ) + lane_smem_Q_d) * sizeof(half));
+                            LDMATRIX_X4(R_Q[tile_K_d][i][0], R_Q[tile_K_d][i][1],
+                                    R_Q[tile_K_d][i][2], R_Q[tile_K_d][i][3], lane_smem_Q_ptr);
+                        }
+                    }
+                }
+            }
+        #pragma unroll
+            for (int j = 0; j < kWarpTileSeqLenK; j++) {
+                int warp_smem_K_Bc = warp_KV * (kMmaAtomN * kWarpTileSeqLenK) + j * kMmaAtomN;
+                int lane_smem_K_Bc = warp_smem_K_Bc + lane_id % 8;
+                int lane_smem_K_d = tile_K_d * kMmaAtomK + ((lane_id / 8) % 2) * 8;
+                uint32_t lane_smem_K_ptr = (smem_K_base_ptr + (lane_smem_K_Bc * (kHeadDim + kPadK) + lane_smem_K_d) * sizeof(half));
+                LDMATRIX_X2_T(R_K[j][0], R_K[j][1], lane_smem_K_ptr); 
+            }
+        }
+    }
 }
