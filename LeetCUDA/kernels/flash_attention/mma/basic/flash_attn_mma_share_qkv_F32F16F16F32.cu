@@ -107,4 +107,29 @@ __global__ void __launch_bounds__(WARP_SIZE * kMMaTileSeqLenQ * kMmaTileSeqLenK)
         CP_ASYNC_COMMIT_GROUP();
     }
     
+#pragma unroll 1
+    for (int tile_K_seqlen = 0; tile_K_seqlen < Tc; ++tile_K_seqlen) {
+        static_assert(kCanPrefetchQs2r);
+        if constexpr(kCanPrefetchQs2r) {
+            if (tile_K_seqlen == 0) {
+                CP_ASYNC_WAIT_GROUP(0);
+                __syncthreads();
+
+            #pragma unroll
+                for (int tile_K_d = 0; tile_K_d < (kHeaddim / kMmaAtomK); ++tile_K_d) {
+                #pragma unroll
+                    for (int i = 0; i < kWarpTileSeqLenQ; i++) {
+                        int warp_smem_Q_Br = warp_QP * (kMmaAtomM * kWarpTileSeqLenQ) + i * kMmaAtomM;
+                        int lane_smem_Q_Br = warp_smem_Q_Br + (lane_id % 16);
+                        int lane_smem_Q_d = tile_K_d + (lane_id / 16) * 8;
+                        int lane_smem_Q_ptr = (smem_Q_base_ptr + (lane_smem_Q_Br * (kHeaddim + kPadQ) + lane_smem_Q_d) * sizeof(half));
+                        LDMATRIX_X4(R_Q[tile_K_d][i][0], R_Q[tile_K_d][i][1],
+                                    R_Q[tile_K_d][i][2], R_Q[tile_K_d][i][3], lane_smem_Q_ptr);
+                    }
+                }
+                __syncthreads();
+            }
+        }
+        
+    }
 }
