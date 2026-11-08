@@ -130,6 +130,81 @@ __global__ void __launch_bounds__(WARP_SIZE * kMMaTileSeqLenQ * kMmaTileSeqLenK)
                 __syncthreads();
             }
         }
-        
+        // load K from gmem to smem
+        if constexpr(kCanPrefetchKVg2s) {
+            if (tile_K_seqlen == 0) {
+                load_gmem_K_Bc_offset = tile_K_seqlen * Bc;
+                int load_gmem_K_Bc = load_gmem_K_Bc_offset + load_smem_K_Bc;
+                int load_gmem_K_d = load_smem_K_d;
+                int load_gmem_K_addr = K_gmem_offset + load_gmem_K_Bc * kHeaddim + load_gmem_K_d;
+                uint32_t load_smem_K_ptr = (smem_K_base_ptr + (kPrefetchKg2sSmemId * K_tile_size
+                            + load_smem_K_Bc * (kHeaddim + kPadK) + load_smem_K_d) * sizeof(half));
+            #pragma unroll
+                for (int i = 0; i < (kHeaddim / (kNumThreads / Bc)); i += 8) {
+                    CP_ASYNC_CG(load_smem_K_ptr + i * 2, &K[load_gmem_K_addr + i], 16);
+                }
+                CP_ASYNC_COMMIT_GROUP();
+
+                CP_ASYNC_WAIT_GROUP(0);
+                __syncthreads();
+            }
+            // prefetch V from gmem to smem
+            {
+                load_gmem_V_Bc_offset = tile_K_seqlen * Bc;
+                int load_gmem_V_Bc = load_gmem_V_Bc_offset + load_smem_V_Bc;
+                int load_gmem_V_d = load_smem_V_d;
+                int load_gmem_V_addr = V_gmem_offset + load_gmem_V_Bc * kHeaddim + load_gmem_V_d;
+                uint32_t load_smem_V_ptr = (smem_V_base_ptr + (kPrefetchVg2sSmemId * V_tile_size + 
+                                        load_smem_V_Bc * (kHeaddim + kPadV) + load_smem_V_d) * sizeof(half));
+            #pragma unroll
+                for (int i = 0; i < (kHeaddim / (kNumThreads / Bc)); i += 8) {
+                    CP_ASYNC_CG(load_smem_V_ptr + i * 2, &V[load_gmem_V_addr + i], 16);
+                }
+                CP_ASYNC_COMMIT_GROUP();
+            }
+        } else {
+            load_gmem_K_Bc_offset = tile_K_seqlen * Bc;
+            int load_gmem_K_Bc = load_gmem_K_Bc_offset + load_smem_K_Bc;
+            int load_gmem_K_d = load_smem_K_d;
+            int load_gmem_K_addr = K_gmem_offset + load_gmem_K_Bc * kHeaddim + load_gmem_K_d;
+            uint32_t load_smem_K_ptr = (smem_K_base_ptr + (kPrefetchKg2sSmemId * K_tile_size +
+                        load_smem_K_Bc * (kHeaddim + kPadK) + load_smem_K_d) * sizeof(half));
+        #pragma unroll
+            for (int i = 0; i < (kHeaddim / (kNumThreads / Bc)); i += 8) {
+                CP_ASYNC_CG(load_smem_K_ptr + i * 2, &K[load_gmem_K_addr + i], 16);
+            }
+            CP_ASYNC_COMMIT_GROUP();
+
+            CP_ASYNC_WAIT_GROUP(0);
+            __syncthreads();
+        }
+
+        // loop over K d : tile_K_d, kMmaAtomK
+        fill_3D_regs<uint32_t, kWarpTileSeqLenQ, kWarpTileSeqLenK, 2>(R_S, 0);
+    #pragma unroll
+        for (int tile_K_d = 0; tile_K_d < (kHeaddim / kMmaAtomK); ++tile_K_d) {
+            // load K from smem to regs
+        #pragma unroll
+            for (int j = 0; j < kWarpTileSeqLenK; j++) {
+                int warp_smem_K_Bc = warp_KV * (kMmaAtomK * kWarpTileSeqLenK) + j * kMmaAtomK;
+                int lane_smem_K_Bc = warp_smem_K_Bc + lane_id % 8;
+                int lane_smem_K_d = tile_K_d * kMmaAtomK + ((lane_id / 8) % 2) * 8;
+                uint32_t lane_smem_K_ptr = (smem_K_base_ptr +  (kPrefetchKg2sSmemId * K_tile_size +
+                            lane_smem_K_Bc * (kHeaddim + kPadK) + lane_smem_K_d) * sizeof(half));
+                LDMATRIX_X2_T(R_K[j][0], R_K[j][1], lane_smem_K_ptr);
+            } 
+            // MMA compute
+            static_assert(kWarpTileSeqLenQ == 1);
+            {
+            #pragma unroll
+                for (int j = 0; j < kWarpTileSeqLenK; j++) {
+                    HMMA16816(R_S[0][j][0], R_S[0][j][1], R_Q[tile_K_d][0][0],
+                            R_Q[tile_K_d][0][1], R_Q[tile_K_d][0][2],
+                            R_Q[tile_K_d][0][3], R_K[j][0], R_K[j][1], R_S[0][j][0],
+                            R_S[0][j][1]);
+                }
+            } 
+        }
+        __syncthreads();
     }
 }
