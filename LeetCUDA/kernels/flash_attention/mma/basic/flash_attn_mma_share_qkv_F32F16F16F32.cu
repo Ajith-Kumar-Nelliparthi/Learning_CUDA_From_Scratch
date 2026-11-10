@@ -389,4 +389,198 @@ __global__ void __launch_bounds__(WARP_SIZE * kMMaTileSeqLenQ * kMmaTileSeqLenK)
     __syncthreads();
 
     // rescale O once more
+    static_assert(kWarpTileSeqLenP == 1);
+    {
+        float rescale_factor_0 = __frcp_rn(lane_block_row_sum_old[0][0]);
+        float rescale_factor_1 = __frcp_rn(lane_block_row_sum_old[0][1]);
+    #pragma unroll
+        for (int j = 0; j < kWarpTileHeadDimV; ++j) {
+            if constexpr(kOStorageAccFloat32) {
+                float *t_fptr_D_0_1 = reinterpret_cast<float *>(&(R_D[0][j][0]));
+                half *t_hptr_D_0_1 = reinterpret_cast<half *>(&(R_D[0][j][0]));
+                t_hptr_D_0_1[0] = __float2half_rn(rescale_factor_0 * t_fptr_D_0_1[0]);
+                t_hptr_D_0_1[1] = __float2half_rn(rescale_factor_0 * t_fptr_D_0_1[1]);
+                t_hptr_D_0_1[2] = __float2half_rn(rescale_factor_1 * t_fptr_D_0_1[2]);
+                t_hptr_D_0_1[3] = __float2half_rn(rescale_factor_1 * t_fptr_D_0_1[3]);
+            } else {
+                half *t_hptr_D_0_1 = reinterpret_cast<half *>(&(R_D[0][j][0]));
+                t_hptr_D_0_1[0] = __float2half_rn(rescale_factor_0 * __half2float(t_hptr_D_0_1[0]));
+                t_hptr_D_0_1[1] = __float2half_rn(rescale_factor_0 * __half2float(t_hptr_D_0_1[1]));
+                t_hptr_D_0_1[2] = __float2half_rn(rescale_factor_1 * __half2float(t_hptr_D_0_1[2]));
+                t_hptr_D_0_1[3] = __float2half_rn(rescale_factor_1 * __half2float(t_hptr_D_0_1[3]));
+            }
+        }
+    }
+
+    // store O(D)
+    static_assert(kWarpTileSeqLenP == 1);
+    {
+    #pragma unroll
+        for (int j = 0; j < kWarpTileHeadDimV; j++) {
+            static_assert(kCanPrefetchQs2r && kNumPrefetchQs2r > 1);
+            R_Q[0][0][0] = R_D[0][j][0];
+            R_Q[1][0][0] = R_D[0][j][1]; // warp_size 4
+            R_Q[0][0][1] = __shfl_sync((0xffffffff), R_D[0][j][0], lane_id + 1, 4);
+            R_Q[0][0][2] = __shfl_sync((0xffffffff), R_D[0][j][0], lane_id + 2, 4);
+            R_Q[0][0][3] = __shfl_sync((0xffffffff), R_D[0][j][0], lane_id + 3, 4);
+            R_Q[1][0][1] = __shfl_sync((0xffffffff), R_D[0][j][1], lane_id + 1, 4);
+            R_Q[1][0][2] = __shfl_sync((0xffffffff), R_D[0][j][1], lane_id + 2, 4);
+            R_Q[1][0][3] = __shfl_sync((0xffffffff), R_D[0][j][1], lane_id + 3, 4);
+            if (lane_id % 4 == 0) {
+                int store_warp_regs_O_Br = warp_QP * (kMmaAtomM * kWarpTileSeqLenP) + 0 * kMmaAtomM;
+                int store_lane_gmem_O_Br = O_tile_id * Br + store_warp_regs_O_Br + lane_id / 4; // 0~7
+                int store_warp_regs_O_d = warp_KV * (kMmaAtomN * kWarpTileHeadDimV) + j * kMmaAtomN;
+                int store_lane_gmem_O_d = store_warp_regs_O_d; // (0~3)*16+(0/8)
+                int store_gmem_O_addr_0 = (O_gmem_offset + (store_lane_gmem_O_Br + 0) * kHeadDim + store_lane_gmem_O_d);
+                int store_gmem_O_addr_1 = (O_gmem_offset + (store_lane_gmem_O_Br + 8) * kHeadDim + store_lane_gmem_O_d);
+                LDST128BITS(O[store_gmem_O_addr_0]) = LDST128BITS(R_Q[0][0][0]);
+                LDST128BITS(O[store_gmem_O_addr_1]) = LDST128BITS(R_Q[1][0][0]);
+            }
+        }
+    }
+}
+
+template <const int kHeadDim, const int kStage>
+void launch_flash_attn_mma_stages_split_q_shared_qkv_acc_f32(torch::Tensor Q,
+                                                             torch::Tensor K,
+                                                             torch::Tensor V,
+                                                             torch::Tensor O) {
+  constexpr int kMmaAtomM = 16;
+  constexpr int kMmaAtomN = 8;
+  constexpr int kMmaAtomK = 16;
+#ifdef BUILD_FLASH_ATTN_MMA_L20
+  constexpr int kMmaTileSeqLenQ = 4;
+  constexpr int kMmaTileSeqLenK = 1;
+  constexpr int kMmaTileSeqLenP = 4;
+  constexpr int kMmaTileHeadDimV = 1;
+  constexpr int kWarpTileSeqLenQ = 1;
+  constexpr int kWarpTileSeqLenK = (kStage > 1) ? 4 : 8;
+  constexpr int kWarpTileSeqLenP = 1;
+#else
+  constexpr int kMmaTileSeqLenQ = (kHeadDim < 128) ? 8 : 8;
+  constexpr int kMmaTileSeqLenK = 1;
+  constexpr int kMmaTileSeqLenP = (kHeadDim < 128) ? 8 : 8;
+  constexpr int kMmaTileHeadDimV = 1;
+  constexpr int kWarpTileSeqLenQ = 1;
+  constexpr int kWarpTileSeqLenK = (kHeadDim < 128) ? 8 : 8;
+  constexpr int kWarpTileSeqLenP = 1;
+#endif
+  constexpr int kWarpTileHeadDimV =
+      (kHeadDim / (kMmaAtomN * kMmaTileHeadDimV)); // 8,16,32,....
+  constexpr int Br =
+      kMmaAtomM * kMmaTileSeqLenQ * kWarpTileSeqLenQ; // 16*4*1=64
+  constexpr int Bc =
+      kMmaAtomN * kMmaTileSeqLenK * kWarpTileSeqLenK; //  8*1*8=64
+  constexpr int kNumThreads =
+      WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK; // 32*4*1=128, num threads
+  constexpr int kPadQ = 8;
+  constexpr int kPadK = 8;
+  constexpr int kPadV = 8;
+  if constexpr (kStage > 1) {
+    static_assert(((Br / Bc) >= 2));
+  }
+  constexpr int kOStorageAccFloat32 = 1;
+  constexpr int Q_tile_size = (Br * (kHeadDim + kPadQ));
+  constexpr int K_tile_size = (Bc * (kHeadDim + kPadK));
+  constexpr int V_tile_size = (Bc * (kHeadDim + kPadV));
+  // 128x(32/64/128)x2/1024=8/16/32M
+  int smem_max_size =
+      max(Q_tile_size, max(K_tile_size, V_tile_size)) * sizeof(half);
+  if constexpr (kStage > 1) { // make sure kStage > 1 work
+    smem_max_size =
+        smem_max_size > kStage * max(K_tile_size, V_tile_size) * sizeof(half)
+            ? smem_max_size
+            : kStage * max(K_tile_size, V_tile_size) * sizeof(half);
+  }
+
+  const int QKV_batch = Q.size(0);
+  const int QKV_head = Q.size(1);
+  const int QKV_seqlen = Q.size(2);      // QKV_seqlen
+  assert(QKV_seqlen % max(Br, Bc) == 0); // multiple of max(Br, Bc)
+
+  dim3 grid(div_ceil(QKV_seqlen, Br), QKV_batch * QKV_head);
+  dim3 block(kNumThreads); // 4/8 warps per block
+
+  cudaFuncSetAttribute(
+      flash_attn_mma_stages_split_q_shared_qkv_acc_f32_kernel<
+          kHeadDim, kMmaAtomM, kMmaAtomN, kMmaAtomK, kMmaTileSeqLenQ,
+          kMmaTileSeqLenK, kMmaTileSeqLenP, kMmaTileHeadDimV, kWarpTileSeqLenQ,
+          kWarpTileSeqLenK, kWarpTileSeqLenP, kWarpTileHeadDimV,
+          kOStorageAccFloat32, kStage, kPadQ, kPadK, kPadV>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      // kMaxSramPerBlock
+      98304);
+
+  flash_attn_mma_stages_split_q_shared_qkv_acc_f32_kernel<
+      kHeadDim, kMmaAtomM, kMmaAtomN, kMmaAtomK, kMmaTileSeqLenQ,
+      kMmaTileSeqLenK, kMmaTileSeqLenP, kMmaTileHeadDimV, kWarpTileSeqLenQ,
+      kWarpTileSeqLenK, kWarpTileSeqLenP, kWarpTileHeadDimV,
+      kOStorageAccFloat32, kStage, kPadQ, kPadK, kPadV>
+      <<<grid, block, smem_max_size>>>(reinterpret_cast<half *>(Q.data_ptr()),
+                                       reinterpret_cast<half *>(K.data_ptr()),
+                                       reinterpret_cast<half *>(V.data_ptr()),
+                                       reinterpret_cast<half *>(O.data_ptr()),
+                                       QKV_seqlen, QKV_head);
+}
+
+void flash_attn_mma_stages_split_q_shared_qkv_acc_f32(torch::Tensor Q,
+                                                      torch::Tensor K,
+                                                      torch::Tensor V,
+                                                      torch::Tensor O,
+                                                      int stages) {
+  CHECK_TORCH_TENSOR_DTYPE(Q, torch::kHalf) // Q [B,H,N,D]
+  CHECK_TORCH_TENSOR_DTYPE(K, torch::kHalf) // K [B,H,N,D]
+  CHECK_TORCH_TENSOR_DTYPE(V, torch::kHalf) // V [B,H,N,D]
+  CHECK_TORCH_TENSOR_DTYPE(O, torch::kHalf) // O [B,H,N,D]
+  const int d = Q.size(3);                  // B, H, N, d
+
+  if (stages > 1) {
+    switch (d) {
+    case 32:
+      launch_flash_attn_mma_stages_split_q_shared_qkv_acc_f32<32, 2>(Q, K, V,
+                                                                     O);
+      break;
+    case 64:
+      launch_flash_attn_mma_stages_split_q_shared_qkv_acc_f32<64, 2>(Q, K, V,
+                                                                     O);
+      break;
+    case 96:
+      launch_flash_attn_mma_stages_split_q_shared_qkv_acc_f32<96, 2>(Q, K, V,
+                                                                     O);
+      break;
+    case 128:
+      launch_flash_attn_mma_stages_split_q_shared_qkv_acc_f32<128, 2>(Q, K, V,
+                                                                      O);
+      break;
+    default:
+      throw std::runtime_error("headdim not support!");
+      break;
+    }
+  } else {
+    switch (d) {
+    case 32:
+      launch_flash_attn_mma_stages_split_q_shared_qkv_acc_f32<32, 1>(Q, K, V,
+                                                                     O);
+      break;
+    case 64:
+      launch_flash_attn_mma_stages_split_q_shared_qkv_acc_f32<64, 1>(Q, K, V,
+                                                                     O);
+      break;
+    case 96:
+      launch_flash_attn_mma_stages_split_q_shared_qkv_acc_f32<96, 1>(Q, K, V,
+                                                                     O);
+      break;
+    case 128:
+      launch_flash_attn_mma_stages_split_q_shared_qkv_acc_f32<128, 1>(Q, K, V,
+                                                                      O);
+      break;
+    case 256:
+      launch_flash_attn_mma_stages_split_q_shared_qkv_acc_f32<256, 1>(Q, K, V,
+                                                                      O);
+      break;
+    default:
+      throw std::runtime_error("headdim not support!");
+      break;
+    }
+  }
 }
