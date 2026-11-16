@@ -34,4 +34,19 @@ __global__ void __launch_bounds__(WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK)
     constexpr int kNumThreads = WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK;
     const int Tc = div_ceil(QKV_seqlen, Bc);
     const float scale = 1.0f / sqrt((float)kHeadDim);
+
+    const int QKV_batch_id = blockIdx.y / QKV_head;
+    const int QKV_head_id = blockIdx.y % QKV_head;
+    const int Q_tile_id = blockIdx.x;
+    const int O_tile_id = Q_tile_id;
+    const int tid = threadIdx.x;
+    const int warp_id = tid / WARP_SIZE;
+    const int lane_id = tid % WARP_SIZE;
+    const int warp_QP = warp_id;
+    const int warp_KV = 0;
+
+    const int Q_gmem_offset = ((QKV_batch_id * QKV_head * QKV_seqlen * kHeadDim) + (QKV_head_id * QKV_seqlen * kHeadDim));
+    const int K_gmem_offset = ((QKV_batch_id * QKV_head * QKV_seqlen * kHeadDim) + (QKV_head_id * QKV_seqlen * kHeadDim));
+    const int V_gmem_offset = Q_gmem_offset;
+    const int O_gmem_offset = Q_gmem_offset;
 }
