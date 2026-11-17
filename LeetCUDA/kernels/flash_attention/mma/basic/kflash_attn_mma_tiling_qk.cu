@@ -49,4 +49,29 @@ __global__ void __launch_bounds__(WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK)
     const int K_gmem_offset = ((QKV_batch_id * QKV_head * QKV_seqlen * kHeadDim) + (QKV_head_id * QKV_seqlen * kHeadDim));
     const int V_gmem_offset = Q_gmem_offset;
     const int O_gmem_offset = Q_gmem_offset;
+
+    int load_smem_Q_Br = (tid / (kNumThreads / Br));
+    int load_smem_Q_d = (tid % (kNumThreads / Br)) * (kMmaAtomK / (kNumThreads / Br));
+    int load_smem_K_Bc = (tid / (kNumThreads / Bc));
+    int load_smem_K_d = (tid % (kNumThreads / Bc)) * (kMmaAtomK / (kNumThreads / Bc));
+    int load_smem_V_Bc = (tid / (kNumThreads / kMmaAtomK));
+    int load_smem_V_d = (tid % (kNumThreads / kMmaAtomK)) * (kHeadDim / (kNumThreads / kMmaAtomK));
+
+    int load_gmem_Q_Br = Q_tile_id * Br + load_smem_Q_Br;
+    if (load_gmem_Q_Br >= QKV_seqlen) return;
+    constexpr bool kIsVCanLoadIn128b = (kHeadDim / (kNumThreads / kMmaAtomK)) % 8 == 0;
+    constexpr bool kIsVCanLoadIn64b = (kHeadDim / (kNumThreads / kMmaAtomK)) % 4 == 0;
+    static_assert(kIsVCanLoadIn128b || kIsVCanLoadIn64b, "V can't load in 128b or 64b");
+
+    extern __shared__ half smem[];
+    constexpr int Q_tile_size = Br * (kMmaAtomK + kPadQ);
+    constexpr int K_tile_size = Bc * (kMmaAtomK + kPadK);
+    constexpr int V_tile_size = kMmaAtomK * (kHeadDim + kPadV);
+    half *Q_tile_smem = smem;
+    half *K_tile_smem = Q_tile_smem + kStage * Q_tile_size;
+    half *V_tile_smem = Q_tile_smem;
+
+    uint32_t smem_Q_base_ptr = __cvta_generic_to_shared();
+    uint32_t smem_K_base_ptr = __cvta_generic_to_shared();
+    uint32_t smem_V_base_ptr = __cvta_generic_to_shared();
 }
