@@ -74,4 +74,23 @@ __global__ void __launch_bounds__(WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK)
     uint32_t smem_Q_base_ptr = __cvta_generic_to_shared();
     uint32_t smem_K_base_ptr = __cvta_generic_to_shared();
     uint32_t smem_V_base_ptr = __cvta_generic_to_shared();
+
+    float lane_block_row_max_old[kWarpTileSeqLenQ][2];
+    float lane_block_row_sum_old[kWarpTileSeqLenQ][2];
+    fill_2D_regs<float, kWarpTileSeqLenQ, 2>(lane_block_row_max_old, -INFINITY);
+    fill_2D_regs<float, kWarpTileSeqLenQ, 2>(lane_block_row_sum_old, 0.0f);
+
+    uint32_t R_Q[kWarpTileSeqLenQ][4];
+    uint32_t R_K[kWarpTileSeqLenQ][2];
+    uint32_t R_V[kWarpTileHeadDimV][2];
+    uint32_t R_S[kWarpTileSeqLenQ][kWarpTileSeqLenK][2];
+    uint32_t R_P[kWarpTileSeqLenP][kWarpTileHeadDimV][2];
+    uint32_t R_O[kWarpTileSeqLenP][kWarpTileHeadDimV][2];
+    uint32_t R_D[kWarpTileSeqLenP][kWarpTileHeadDimV][(kOStorageAccFloat32) ? 4 : 2];
+    fill_3D_regs<uint32_t, kWarpTileSeqLenP, kWarpTileHeadDimV, ((kOStorageAccFloat32) ? 4 : 2)>(R_D, 0);
+
+#pragma unroll 1
+    for (int tile_K_seqlen = 0; tile_K_seqlen < Tc; tile_K_seqlen++) {
+        
+    }
 }
