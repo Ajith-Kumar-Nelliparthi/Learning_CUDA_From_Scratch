@@ -91,6 +91,34 @@ __global__ void __launch_bounds__(WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK)
 
 #pragma unroll 1
     for (int tile_K_seqlen = 0; tile_K_seqlen < Tc; tile_K_seqlen++) {
+        if constexpr(kStage > 1) {
+    #pragma unroll
+            for (int stage = 0; stage < (kStage - 1); stage++) {
+                int load_gmem_Q_d = load_smem_Q_d;
+                int load_gmem_Q_addr = Q_gmem_offset + load_gmem_Q_Br * kHeadDim + load_gmem_Q_d;
+                uint32_t load_smem_Q_ptr = (smem_Q_base_ptr + 
+                                        (stage * Q_tile_size + load_smem_Q_Br * (kHeadDim + kPadQ) + load_smem_Q_d) * sizeof(half));
+            #pragma unroll
+                for (int i = 0; i < (kMmaAtomK / (kNumThreads / Br)); i += 8) {
+                    CP_ASYNC_CG(load_smem_Q_ptr + i * 2, &Q[load_gmem_Q_addr + i], 16);
+                }
+                CP_ASYNC_COMMIT_GROUP();
+
+                // K g2s
+                int load_gmem_K_Bc = (tile_K_seqlen * Bc) + load_smem_K_Bc;
+                int load_gmem_K_d = (stage * kMmaAtomK) + load_smem_K_d;
+                int load_gmem_K_addr = K_gmem_offset + load_gmem_K_Bc * kHeadDim + load_gmem_K_d;
+                uint32_t load_smem_K_ptr = (smem_K_base_ptr + 
+                                            (stage * K_tile_size + load_smem_K_Bc * (kHeadDim + kPadK) + load_smem_K_d) * sizeof(half));
+            #pragma unroll
+                for (int i = 0; i < (kMmaAtomK / (kNumThreads / Bc)); i += 8) {
+                    CP_ASYNC_CG(load_smem_K_ptr + i * 2, &K[load_gmem_K_addr + i], 16);
+                }
+                CP_ASYNC_COMMIT_GROUP();
+            }
+            CP_ASYNC_WAIT_GROUP(kStage - 2);
+            __syncthreads();
+        }
         
     }
 }
