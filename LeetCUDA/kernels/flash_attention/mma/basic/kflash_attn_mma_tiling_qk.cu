@@ -120,5 +120,41 @@ __global__ void __launch_bounds__(WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK)
             __syncthreads();
         }
         
+        // loop over K<d>
+        fill_3D_regs<uint32_t, kWarpTileSeqLenQ, kWarpTileSeqLenK, 2>(R_S, 0);
+    #pragma unroll
+        for (int tile_K_d = 0; tile_K_d < (kHeadDim / kMmaAtomK); tile_K_d++) {
+            int smem_sel = (tile_K_d) % kStage;
+            int smem_sel_next = (tile_K_d + (kStage - 1)) % kStage;
+
+            if constexpr(kStage > 1) {
+                if ((tile_K_d + 1) < (kHeadDim / kMmaAtomK)) {
+                    // Q tile into g2s
+                    int load_gmem_Q_d = ((tile_K_d + 1) * kMmaAtomK) + load_smem_Q_d;
+                    int load_gmem_Q_addr = Q_gmem_offset + load_gmem_Q_Br * kHeadDim + load_gmem_Q_d;
+                    uint32_t load_smem_Q_ptr = (smem_Q_base_ptr + (smem_sel_next * Q_tile_size +
+                                        load_smem_Q_Br * (kHeadDim + kPadQ) + load_smem_Q_d) * sizeof(half));
+                #pragma unroll
+                    for (int i = 0; i < (kMmaAtomK / (kNumThreads / Bc)); i += 8) {
+                        CP_ASYNC_CG(load_smem_Q_ptr + i * 2, &Q[load_gmem_Q_addr + i], 16);
+                    }
+                    CP_ASYNC_COMMIT_GROUP();
+
+                    // next K tile g2s
+                    int load_gmem_K_Bc = tile_K_seqlen * Bc + load_smem_K_Bc;
+                    int load_gmem_K_d = ((tile_K_d + 1) * kMmaAtomK) + load_smem_K_d;
+                    int load_gmem_K_addr = K_gmem_offset + load_gmem_K_Bc * kHeadDim + load_gmem_K_d;
+                    uint32_t load_smem_K_ptr = (smem_K_base_ptr + (smem_sel_next * K_tile_size +
+                                        load_smem_K_Bc * (kHeadDim + kPadK) + load_smem_K_d) * sizeof(half));
+                #pragma unroll
+                    for (int i = 0; i < (kMmaAtomK / (kNumThreads / Bc)); i += 8) {
+                        CP_ASYNC_CG(load_smem_K_ptr + i * 2, &K[load_gmem_K_addr + i], 16);
+                    }
+                    CP_ASYNC_COMMIT_GROUP();
+                }
+            } else {
+                
+            }
+        }
     }
 }
