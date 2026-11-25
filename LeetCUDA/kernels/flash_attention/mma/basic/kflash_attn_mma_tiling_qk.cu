@@ -153,7 +153,51 @@ __global__ void __launch_bounds__(WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK)
                     CP_ASYNC_COMMIT_GROUP();
                 }
             } else {
-                
+                // Q tile g2s
+                int load_gmem_Q_d = (tile_K_d * kMmaAtomK) + load_smem_Q_d;
+                int load_gmem_Q_addr = Q_gmem_offset + load_gmem_Q_Br * kHeadDim + load_gmem_Q_d;
+                uint32_t load_smem_Q_ptr = (smem_Q_base_ptr + (smem_sel * Q_tile_size +
+                                            load_smem_Q_Br * (kHeadDim + kPadQ) + load_smem_Q_d) * sizeof(half));
+            #pragma unroll
+                for (int i = 0; i < (kMmaAtomK / (kNumThreads / Br)); i += 8) {
+                    CP_ASYNC_CG(load_smem_Q_ptr + i * 2, &Q[load_gmem_Q_addr + i], 16);
+                }
+                CP_ASYNC_COMMIT_GROUP();
+
+                // curr K tile g2s
+                int load_gmem_K_Bc = (tile_K_seqlen * Bc) + load_smem_K_Bc;
+                int load_gmem_K_d = (tile_K_d * kMmaAtomK) + load_smem_K_d;
+                int load_gmem_K_addr = K_gmem_offset + load_gmem_K_Bc * kHeadDim + load_gmem_K_d;
+                uint32_t load_smem_K_ptr = (smem_K_base_ptr + (smem_sel * K_tile_size + 
+                                            load_smem_K_Bc * (kHeadDim + kPadK) + load_smem_K_d) * sizeof(half));
+            #pragma unroll
+                for (int i = 0; i < (kHeadDim / (kNumThreads / Bc)); i += 8) {
+                    CP_ASYNC_CG(load_smem_K_ptr + i * 2, &K[load_gmem_K_addr + i], 16);
+                }
+                CP_ASYNC_COMMIT_GROUP();
+
+                CP_ASYNC_WAIT_GROUP(0);
+                __syncthreads();
+            }
+            // Q s2r
+            static_assert(kWarpTileSeqLenQ == 1);
+            {
+                int warp_smem_Q_Br = warp_QP * (kMmaAtomM * kWarpTileSeqLenQ) + 0 * kMmaAtomM;
+                int lane_smem_Q_Br = warp_smem_Q_Br + lane_id % 16;
+                int lane_smem_Q_d = (lane_id / 16) * 8;
+                uint32_t lane_smem_Q_ptr = (smem_Q_base_ptr + (smem_sel * Q_tile_size
+                                            + lane_smem_Q_Br * (kMmaAtomK + kPadQ) + lane_smem_Q_d) * sizeof(half));
+                LDMATRIX_X4(R_Q[0][0], R_Q[0][1], R_Q[0][2], R_Q[0][3], lane_smem_Q_ptr);
+            }
+            // K from s2r
+        #pragma unroll
+            for (int j = 0; j < kWarpTileSeqLenK; j++) {
+                int warp_smem_K_Bc = warp_KV * (kMmaAtomN * kWarpTileSeqLenK) + j * kMmaAtomN;
+                int lane_smem_K_Bc = warp_smem_K_Bc + lane_id % 8;
+                int lane_smem_K_d = ((lane_id / 8) % 2) * 8;
+                uint32_t lane_smem_K_ptr = (smem_K_base_ptr + (smem_sel * K_tile_size +
+                                            lane_smem_K_Bc * (kMmaAtomK + kPadK) + lane_smem_K_d) * sizof(half));
+                LDMATRIX_X2(R_S[j][0], R_K[j][1], lane_smem_K_ptr);
             }
         }
     }
