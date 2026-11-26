@@ -199,6 +199,25 @@ __global__ void __launch_bounds__(WARP_SIZE * kMmaTileSeqLenQ * kMmaTileSeqLenK)
                                             lane_smem_K_Bc * (kMmaAtomK + kPadK) + lane_smem_K_d) * sizof(half));
                 LDMATRIX_X2(R_S[j][0], R_K[j][1], lane_smem_K_ptr);
             }
+            if constexpr(kStage < 2) {
+                __syncthreads();
+            }
+
+            // mma compute
+            static_assert(kWarpTileSeqLenQ == 1);
+            {
+            #pragma unroll
+                for (int j = 0; j < kWarpTileSeqLenK; j++) {
+                    HMMA16816(R_S[0][j][0], R_S[0][j][1], R_Q[0][0], R_Q[0][1], R_Q[0][2],
+                    R_Q[0][3], R_K[j][0], R_K[j][1], R_S[0][j][0],
+                    R_S[0][j][1]);
+                }
+            }
+            if constexpr(kStage > 1) {
+                CP_ASYNC_WAIT_GROUP(kStage - 2);
+                __syncthreads();
+            }
         }
+        __syncthreads();
     }
 }
